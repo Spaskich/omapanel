@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Fixture Local
+Comment=An unowned local launcher
+Exec=fixture-local

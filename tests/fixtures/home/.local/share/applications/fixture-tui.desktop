@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Fixture TUI
+Comment=A managed terminal launcher
+Icon=fixture-tui
+Exec=xdg-terminal-exec --app-id=fixture -e fixture-command

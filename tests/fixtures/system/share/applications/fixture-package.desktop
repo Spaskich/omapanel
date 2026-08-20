@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Fixture Package App
+Comment=An application owned by Pacman
+Icon=fixture-package
+Exec=fixture-package

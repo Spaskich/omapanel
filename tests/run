@@ -1,0 +1,119 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+mkdir -p "$TMP/bin" "$TMP/home/.local/share/applications" "$TMP/system/share/applications"
+cp "$ROOT"/tests/fixtures/home/.local/share/applications/*.desktop "$TMP/home/.local/share/applications/"
+cp "$ROOT"/tests/fixtures/system/share/applications/*.desktop "$TMP/system/share/applications/"
+
+cat >"$TMP/bin/pacman" <<'EOF'
+#!/bin/bash
+case "${1:-}" in
+  -Qqm) printf '%s\n' fixture-package ;;
+  -Qqe) printf '%s\n' fixture-package ;;
+  -Qqdt) exit 1 ;;
+  -Qqo)
+    [[ ${2:-} == *fixture-package.desktop ]] && { echo fixture-package; exit 0; }
+    exit 1
+    ;;
+  -Q)
+    if [[ $# == 1 ]]; then echo 'fixture-package 1.2.3-1'
+    elif [[ ${2:-} == fixture-package ]]; then echo 'fixture-package 1.2.3-1'
+    else exit 1
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+
+cat >"$TMP/bin/omarchy" <<'EOF'
+#!/bin/bash
+if [[ ${1:-} == plugin && ${2:-} == list ]]; then
+  echo '[{"id":"omarchy.fixture","name":"System Fixture","kinds":["panel"],"enabled":true,"firstParty":true},{"id":"fixture.community","name":"Community Fixture","kinds":["panel"],"enabled":true,"firstParty":false}]'
+elif [[ ${1:-} == version && ${2:-} == channel ]]; then echo stable
+elif [[ ${1:-} == version && ${2:-} == pkgs ]]; then echo today
+elif [[ ${1:-} == version ]]; then echo 4.0.0-test
+else exit 0
+fi
+EOF
+
+cat >"$TMP/bin/flatpak" <<'EOF'
+#!/bin/bash
+[[ ${1:-} == list ]] && exit 0
+exit 1
+EOF
+
+cat >"$TMP/bin/hyprctl" <<'EOF'
+#!/bin/bash
+if [[ ${1:-} == binds ]]; then echo '[]'; else exit 0; fi
+EOF
+
+cat >"$TMP/bin/systemctl" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+
+for name in omarchy-shell wl-copy xdg-terminal-exec snapper; do
+  cat >"$TMP/bin/$name" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+done
+chmod +x "$TMP/bin"/*
+
+export PATH="$TMP/bin:/usr/bin:/bin"
+export HOME="$TMP/home"
+export XDG_DATA_HOME="$TMP/home/.local/share"
+export XDG_DATA_DIRS="$TMP/system/share"
+
+programs="$($ROOT/scripts/omapanel-backend collect programs)"
+jq -e '.schemaVersion == 1 and (.programs | length) == 7' <<<"$programs" >/dev/null || fail "unexpected program count"
+jq -e '.programs[] | select(.id == "desktop:fixture-web" and .kind == "webapp" and .actionAdapter == "webapp")' <<<"$programs" >/dev/null || fail "web app classification"
+jq -e '.programs[] | select(.id == "desktop:fixture-tui" and .kind == "tui")' <<<"$programs" >/dev/null || fail "TUI classification"
+jq -e '.programs[] | select(.id == "desktop:fixture-package" and .sourceId == "fixture-package")' <<<"$programs" >/dev/null || fail "package ownership"
+jq -e '.programs[] | select(.id == "plugin:fixture.community" and .removable == true)' <<<"$programs" >/dev/null || fail "community plugin"
+jq -e '.programs[] | select(.id == "plugin:omarchy.fixture" and .protected == true)' <<<"$programs" >/dev/null || fail "protected plugin"
+
+health="$($ROOT/scripts/omapanel-backend collect health)"
+jq -e '.schemaVersion == 1 and (.health | length) >= 10' <<<"$health" >/dev/null || fail "health schema"
+
+preview="$($ROOT/scripts/omapanel-backend action --dry-run package fixture-package)"
+jq -e '.ok and .terminal and (.argv | index("FZF_DEFAULT_QUERY=fixture-package"))' <<<"$preview" >/dev/null || fail "package preview"
+web_preview="$($ROOT/scripts/omapanel-backend action --dry-run webapp fixture-web)"
+jq -e '.ok and (.argv | index("fixture-web"))' <<<"$web_preview" >/dev/null || fail "web app preview"
+if "$ROOT/scripts/omapanel-backend" action --dry-run package '../unsafe' >/dev/null 2>&1; then
+  fail "unsafe target accepted"
+fi
+
+config="$TMP/config"
+mkdir -p "$config/omarchy/extensions" "$config/hypr"
+cat >"$config/omarchy/extensions/omarchy-menu.jsonc" <<'EOF'
+{
+  // URLs inside strings must survive the JSONC editor.
+  "personal.docs": {"label":"Docs","action":"omarchy-launch-webapp 'https://example.test/a//b'"},
+}
+EOF
+echo '-- Existing user binding' >"$config/hypr/bindings.lua"
+OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" >/dev/null
+OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" >/dev/null
+[[ $(grep -c 'setup.omapanel' "$config/omarchy/extensions/omarchy-menu.jsonc") == 1 ]] || fail "menu setup is not idempotent"
+[[ $(grep -c '^o.bind("SUPER + I"' "$config/hypr/bindings.lua") == 1 ]] || fail "binding setup is not idempotent"
+grep -q 'https://example.test/a//b' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "JSONC string changed"
+OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" --remove >/dev/null
+! grep -q 'setup.omapanel' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "menu removal failed"
+! grep -q '^o.bind("SUPER + I"' "$config/hypr/bindings.lua" || fail "binding removal failed"
+
+if command -v qmltestrunner >/dev/null 2>&1; then
+  QT_QPA_PLATFORM=offscreen qmltestrunner -input "$ROOT/tests/tst_model.qml"
+fi
+
+echo "All OmaPanel tests passed."

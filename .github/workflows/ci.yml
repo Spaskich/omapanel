@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test tools
+        run: sudo apt-get update && sudo apt-get install -y jq python3 shellcheck qt6-declarative-dev-tools
+      - name: Validate manifest
+        run: jq -e '.schemaVersion == 1 and .id == "spaskich.omapanel" and (.kinds | index("panel"))' manifest.json
+      - name: Check shell
+        run: shellcheck scripts/omapanel-backend setup tests/run
+      - name: Run tests
+        run: ./tests/run

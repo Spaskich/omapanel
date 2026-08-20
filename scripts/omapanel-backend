@@ -1,0 +1,629 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCHEMA_VERSION=1
+OMAPANEL_ID="spaskich.omapanel"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  omapanel-backend collect programs
+  omapanel-backend collect programs --jsonl
+  omapanel-backend collect health
+  omapanel-backend action [--dry-run] <adapter> <target>
+EOF
+}
+
+json_lines_to_array() {
+  if (( $# == 0 )); then
+    printf '[]\n'
+  else
+    printf '%s\n' "$@" | jq -s '.'
+  fi
+}
+
+desktop_value() {
+  local file="$1" key="$2"
+  awk -v wanted="$key" '
+    BEGIN { in_desktop = 0 }
+    /^\[Desktop Entry\][[:space:]]*$/ { in_desktop = 1; next }
+    /^\[/ { if (in_desktop) exit; next }
+    in_desktop {
+      pos = index($0, "=")
+      if (pos == 0) next
+      key = substr($0, 1, pos - 1)
+      if (key == wanted) {
+        print substr($0, pos + 1)
+        exit
+      }
+    }
+  ' "$file"
+}
+
+program_json() {
+  local id="$1" name="$2" description="$3" icon="$4" kind="$5"
+  local source="$6" source_id="$7" version="$8" removable="$9"
+  local protected="${10}" adapter="${11}" target="${12}" action_label="${13}"
+  local workflow="${14}" warning="${15}" advanced="${16}"
+
+  jq -cn \
+    --arg id "$id" \
+    --arg name "$name" \
+    --arg description "$description" \
+    --arg icon "$icon" \
+    --arg kind "$kind" \
+    --arg source "$source" \
+    --arg sourceId "$source_id" \
+    --arg version "$version" \
+    --argjson removable "$removable" \
+    --argjson protected "$protected" \
+    --arg actionAdapter "$adapter" \
+    --arg actionTarget "$target" \
+    --arg actionLabel "$action_label" \
+    --arg workflow "$workflow" \
+    --arg warning "$warning" \
+    --argjson advanced "$advanced" \
+    '{id:$id,name:$name,description:$description,icon:$icon,kind:$kind,
+      source:$source,sourceId:$sourceId,version:$version,
+      removable:$removable,protected:$protected,
+      actionAdapter:$actionAdapter,actionTarget:$actionTarget,
+      actionLabel:$actionLabel,workflow:$workflow,warning:$warning,
+      advanced:$advanced,
+      searchText:([$name,$description,$kind,$source,$sourceId] | join(" ") | ascii_downcase)}'
+}
+
+collect_desktop_programs() {
+  local -a rows=()
+  local -a data_dirs=()
+  local -A seen=()
+  local -A foreign=()
+  local file dir desktop_id name description icon exec_line hidden no_display
+  local kind source source_id version removable protected adapter target label workflow warning
+  local package_owner flatpak_id x_flatpak
+
+  while IFS= read -r package_owner; do
+    [[ -n $package_owner ]] && foreign["$package_owner"]=1
+  done < <(pacman -Qqm 2>/dev/null || true)
+
+  data_dirs+=("${XDG_DATA_HOME:-$HOME/.local/share}/applications")
+  data_dirs+=("$HOME/.local/share/flatpak/exports/share/applications")
+  IFS=: read -ra system_data_dirs <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for dir in "${system_data_dirs[@]}"; do
+    data_dirs+=("$dir/applications")
+  done
+  data_dirs+=("/var/lib/flatpak/exports/share/applications")
+
+  shopt -s nullglob
+  for dir in "${data_dirs[@]}"; do
+    [[ -d $dir ]] || continue
+    for file in "$dir"/*.desktop; do
+      desktop_id="${file##*/}"
+      desktop_id="${desktop_id%.desktop}"
+      [[ -n ${seen[$desktop_id]+x} ]] && continue
+      seen["$desktop_id"]=1
+
+      hidden="$(desktop_value "$file" Hidden)"
+      no_display="$(desktop_value "$file" NoDisplay)"
+      [[ ${hidden,,} == true || ${no_display,,} == true ]] && continue
+
+      name="$(desktop_value "$file" Name)"
+      [[ -n $name ]] || name="$desktop_id"
+      description="$(desktop_value "$file" Comment)"
+      [[ -n $description ]] || description="$(desktop_value "$file" GenericName)"
+      icon="$(desktop_value "$file" Icon)"
+      exec_line="$(desktop_value "$file" Exec)"
+      x_flatpak="$(desktop_value "$file" X-Flatpak)"
+
+      kind="app"
+      source="Local launcher"
+      source_id="$desktop_id"
+      version=""
+      removable=false
+      protected=true
+      adapter=""
+      target=""
+      label=""
+      workflow="No safe removal workflow was identified."
+      warning="This entry is shown for visibility but cannot be removed by OmaPanel."
+
+      if [[ $exec_line =~ omarchy-launch-webapp|omarchy-webapp-handler ]]; then
+        kind="webapp"
+        source="Omarchy Web App"
+        removable=true
+        protected=false
+        adapter="webapp"
+        target="$desktop_id"
+        label="Remove web app"
+        workflow="Omarchy will remove this web app launcher and its managed icon."
+        warning="Only the web app launcher is removed; browser data is left intact."
+      elif [[ $exec_line =~ (\$TERMINAL|xdg-terminal-exec).*-[eE]([[:space:]]|$) ]]; then
+        kind="tui"
+        source="TUI Launcher"
+        removable=true
+        protected=false
+        adapter="tui"
+        target="$desktop_id"
+        label="Remove TUI launcher"
+        workflow="Omarchy will remove this terminal application launcher and its managed icon."
+        warning="The command or Mise tool behind the launcher is not uninstalled."
+      elif [[ -n $x_flatpak || $file == *flatpak/exports/* ]]; then
+        kind="flatpak"
+        source="Flatpak"
+        flatpak_id="${x_flatpak:-$desktop_id}"
+        source_id="$flatpak_id"
+        removable=true
+        protected=false
+        adapter="flatpak"
+        target="$flatpak_id"
+        label="Open Flatpak remover"
+        workflow="A terminal will open the Flatpak uninstall workflow for $flatpak_id."
+        warning="Flatpak may offer to remove unused application data or runtimes separately."
+        version="$(flatpak info --show-version "$flatpak_id" 2>/dev/null || true)"
+      elif package_owner="$(pacman -Qqo "$file" 2>/dev/null | head -n 1)" && [[ -n $package_owner ]]; then
+        source_id="$package_owner"
+        version="$(pacman -Q "$package_owner" 2>/dev/null | awk '{print $2; exit}')"
+        if [[ -n ${foreign[$package_owner]+x} ]]; then
+          source="AUR / foreign package"
+        else
+          source="Pacman package"
+        fi
+        removable=true
+        protected=false
+        adapter="package"
+        target="$package_owner"
+        label="Open package remover"
+        workflow="A terminal will open Omarchy's package remover with $package_owner prefilled."
+        warning="Removing the package can also remove other launchers or dependencies it owns."
+      elif [[ $file == "${XDG_DATA_HOME:-$HOME/.local/share}/applications/"* ]]; then
+        kind="launcher"
+        source="Local launcher"
+        removable=true
+        protected=false
+        adapter="launcher"
+        target="$desktop_id"
+        label="Remove launcher"
+        workflow="Omarchy will remove only the local .desktop launcher."
+        warning="The executable and its data will not be deleted."
+      fi
+
+      rows+=("$(program_json \
+        "desktop:$desktop_id" "$name" "$description" "$icon" "$kind" \
+        "$source" "$source_id" "$version" "$removable" "$protected" \
+        "$adapter" "$target" "$label" "$workflow" "$warning" false)")
+    done
+  done
+  shopt -u nullglob
+
+  json_lines_to_array "${rows[@]}"
+}
+
+collect_plugins() {
+  local raw
+  if ! raw="$(omarchy plugin list --json 2>/dev/null)"; then
+    printf '[]\n'
+    return
+  fi
+
+  jq -c '[.[] | {
+    id:("plugin:" + .id),
+    name:(.name // .id),
+    description:((.kinds // []) | join(", ")),
+    icon:"󰏗",
+    kind:"plugin",
+    source:(if .firstParty then "Omarchy system plugin" else "Community plugin" end),
+    sourceId:.id,
+    version:"",
+    removable:(.firstParty | not),
+    protected:.firstParty,
+    actionAdapter:(if .firstParty then "" else "plugin" end),
+    actionTarget:(if .firstParty then "" else .id end),
+    actionLabel:(if .firstParty then "" else "Open plugin remover" end),
+    workflow:(if .firstParty then "First-party plugins are protected system components." else "A terminal will open Omarchy’s interactive plugin removal workflow." end),
+    warning:(if .firstParty then "It ships with Omarchy and cannot be uninstalled as a community plugin." else "The plugin will be disabled before its files are removed or backed up." end),
+    advanced:false,
+    enabled:(.enabled // false),
+    searchText:([.name,.id,((.kinds // []) | join(" ")),"plugin"] | map(. // "") | join(" ") | ascii_downcase)
+  }]' <<<"$raw"
+}
+
+collect_flatpaks_without_desktop() {
+  command -v flatpak >/dev/null 2>&1 || { printf '[]\n'; return; }
+
+  flatpak list --app --columns=application,name,version,description 2>/dev/null |
+    jq -Rsc '
+      split("\n")
+      | map(select(length > 0) | split("\t"))
+      | map({
+          id:("flatpak:" + .[0]), name:(.[1] // .[0]), description:(.[3] // ""),
+          icon:"", kind:"flatpak", source:"Flatpak", sourceId:.[0], version:(.[2] // ""),
+          removable:true, protected:false, actionAdapter:"flatpak", actionTarget:.[0],
+          actionLabel:"Open Flatpak remover",
+          workflow:("A terminal will open the Flatpak uninstall workflow for " + .[0] + "."),
+          warning:"Flatpak may offer to remove unused application data or runtimes separately.",
+          advanced:false,
+          searchText:([.[1],.[3],.[0],"flatpak"] | map(. // "") | join(" ") | ascii_downcase)
+        })'
+}
+
+collect_explicit_packages() {
+  local foreign_json
+  foreign_json="$(pacman -Qqm 2>/dev/null | jq -Rsc 'split("\n") | map(select(length > 0))')"
+
+  LC_ALL=C join \
+    <(pacman -Q 2>/dev/null | LC_ALL=C sort) \
+    <(pacman -Qqe 2>/dev/null | LC_ALL=C sort) |
+    jq -Rsc --argjson foreign "$foreign_json" '
+      split("\n")
+      | map(select(length > 0) | split(" "))
+      | map({
+          id:("package:" + .[0]), name:.[0], description:"Explicitly installed package",
+          icon:"󰣇", kind:"package",
+          source:(if ($foreign | index(.[0])) then "AUR / foreign package" else "Pacman package" end),
+          sourceId:.[0], version:(.[1] // ""), removable:true, protected:false,
+          actionAdapter:"package", actionTarget:.[0], actionLabel:"Open package remover",
+          workflow:("A terminal will open Omarchy’s package remover with " + .[0] + " prefilled."),
+          warning:"Review Pacman’s dependency list before confirming removal.", advanced:true,
+          searchText:([.[0],.[1],"package",(if ($foreign | index(.[0])) then "aur foreign" else "pacman" end)] | join(" ") | ascii_downcase)
+        })'
+}
+
+collect_programs() {
+  local desktops plugins flatpaks packages combined
+  desktops="$(collect_desktop_programs)"
+  plugins="$(collect_plugins)"
+  flatpaks="$(collect_flatpaks_without_desktop)"
+  packages="$(collect_explicit_packages)"
+
+  combined="$(printf '%s\n%s\n%s\n%s\n' "$desktops" "$plugins" "$flatpaks" "$packages" |
+    jq -cs 'add | unique_by(.id) | sort_by(.name | ascii_downcase)')"
+
+  printf '%s\n' "$combined" | jq -c \
+    --argjson schemaVersion "$SCHEMA_VERSION" \
+    --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,programs:.,
+      providers:{desktopEntries:"ok",packages:"ok",plugins:"ok",
+        flatpak:(if any(.[]; .kind == "flatpak") then "ok" else "unavailable" end)},
+      errors:[]}'
+}
+
+health_json() {
+  local id="$1" title="$2" status="$3" summary="$4" detail="$5"
+  local adapter="${6:-}" target="${7:-}" label="${8:-}" destructive="${9:-false}"
+  jq -cn \
+    --arg id "$id" --arg title "$title" --arg status "$status" \
+    --arg summary "$summary" --arg detail "$detail" \
+    --arg actionAdapter "$adapter" --arg actionTarget "$target" \
+    --arg actionLabel "$label" --argjson destructive "$destructive" \
+    '{id:$id,title:$title,status:$status,summary:$summary,detail:$detail,
+      actionAdapter:$actionAdapter,actionTarget:$actionTarget,
+      actionLabel:$actionLabel,destructive:$destructive}'
+}
+
+disk_health() {
+  local id="$1" title="$2" path="$3" line percent used available status summary
+  line="$(df -P -B1 "$path" 2>/dev/null | awk 'NR==2 {print $3, $4, $5}')"
+  if [[ -z $line ]]; then
+    health_json "$id" "$title" unknown "Usage could not be read" "$path"
+    return
+  fi
+  read -r used available percent <<<"$line"
+  percent="${percent%%%}"
+  if (( percent >= 90 )); then status=error
+  elif (( percent >= 80 )); then status=warning
+  else status=ok
+  fi
+  summary="$percent% used · $(numfmt --to=iec-i --suffix=B "$available" 2>/dev/null || echo "$available bytes") free"
+  health_json "$id" "$title" "$status" "$summary" "$path"
+}
+
+collect_health() {
+  local -a rows=()
+  local version channel packages_date errors failed_user failed_system detail
+  local snapper_configs restart_markers orphan_count missing="" status summary
+
+  version="$(omarchy version 2>/dev/null || true)"
+  channel="$(omarchy version channel 2>/dev/null || true)"
+  packages_date="$(omarchy version pkgs 2>/dev/null || true)"
+  if [[ -n $version ]]; then
+    rows+=("$(health_json omarchy "Omarchy" ok "$version · ${channel:-unknown channel}" "Packages last upgraded: ${packages_date:-unknown}" update _ "Run update")")
+  else
+    rows+=("$(health_json omarchy "Omarchy" error "Version could not be read" "The omarchy command may be unavailable.")")
+  fi
+
+  errors="$(timeout 3 hyprctl configerrors 2>/dev/null || true)"
+  if [[ -z $errors ]]; then
+    rows+=("$(health_json hyprland "Hyprland configuration" ok "No configuration errors" "The active Hyprland configuration parsed successfully.")")
+  else
+    rows+=("$(health_json hyprland "Hyprland configuration" error "Configuration errors detected" "$errors" open-hypr-config _ "Open configuration")")
+  fi
+
+  failed_user="$(timeout 3 systemctl --user --failed --no-legend --plain 2>/dev/null || true)"
+  if [[ -z $failed_user ]]; then
+    rows+=("$(health_json user-services "User services" ok "No failed units" "systemd --user reports no failed units.")")
+  else
+    rows+=("$(health_json user-services "User services" warning "Failed user units detected" "$failed_user" journal-user _ "View journal")")
+  fi
+
+  failed_system="$(timeout 3 systemctl --failed --no-legend --plain 2>/dev/null || true)"
+  if [[ -z $failed_system ]]; then
+    rows+=("$(health_json system-services "System services" ok "No failed units" "systemd reports no failed system units.")")
+  else
+    rows+=("$(health_json system-services "System services" warning "Failed system units detected" "$failed_system" journal-system _ "View journal")")
+  fi
+
+  rows+=("$(disk_health root-disk "Root filesystem" /)")
+  rows+=("$(disk_health home-disk "Home filesystem" "$HOME")")
+
+  if ! command -v snapper >/dev/null 2>&1; then
+    rows+=("$(health_json snapshots "Recovery snapshots" info "Snapper is not installed" "Snapshot actions are unavailable on this system.")")
+  else
+    snapper_configs="$(snapper --csvout list-configs 2>/dev/null | awk -F, 'NR>1 && $1 != "" {print $1}' | paste -sd ', ' -)"
+    if [[ -n $snapper_configs ]]; then
+      rows+=("$(health_json snapshots "Recovery snapshots" ok "Configured for $snapper_configs" "Snapshot contents require elevated permissions and are intentionally not read." snapshot-create _ "Create snapshot")")
+    else
+      rows+=("$(health_json snapshots "Recovery snapshots" warning "Snapper has no configuration" "Updates may not have a usable recovery snapshot.")")
+    fi
+  fi
+
+  restart_markers="$(
+    { find "$HOME/.local/state/omarchy" -maxdepth 1 -type f \( -name 'reboot-required' -o -name 'restart-*-required' \) -printf '%f\n' 2>/dev/null || true; } |
+      sort | paste -sd ', ' -
+  )"
+  if [[ -n $restart_markers ]]; then
+    rows+=("$(health_json restart-state "Restart state" warning "A restart is required" "$restart_markers" update _ "Open update workflow")")
+  else
+    rows+=("$(health_json restart-state "Restart state" ok "No restart markers" "Omarchy has not recorded a pending reboot or service restart.")")
+  fi
+
+  if [[ -e /var/lib/pacman/db.lck ]]; then
+    rows+=("$(health_json pacman-lock "Package database" warning "Pacman database is locked" "A package operation may be active. Do not delete the lock while Pacman is running.")")
+  else
+    rows+=("$(health_json pacman-lock "Package database" ok "Package database is available" "No Pacman database lock is present.")")
+  fi
+
+  orphan_count="$( { pacman -Qqdt 2>/dev/null || true; } | wc -l)"
+  if (( orphan_count > 0 )); then
+    rows+=("$(health_json orphans "Orphaned packages" info "$orphan_count package(s) can be reviewed" "Omarchy will open its interactive orphan review; nothing is removed automatically." review-orphans _ "Review packages")")
+  else
+    rows+=("$(health_json orphans "Orphaned packages" ok "No orphaned packages" "Pacman reports no unrequired dependency packages.")")
+  fi
+
+  for required in omarchy omarchy-shell hyprctl pacman jq wl-copy xdg-terminal-exec; do
+    command -v "$required" >/dev/null 2>&1 || missing+="${missing:+, }$required"
+  done
+  if [[ -z $missing ]]; then
+    rows+=("$(health_json commands "Recovery tools" ok "Required commands are available" "OmaPanel can launch all core POC handoffs." copy-report _ "Copy report")")
+  else
+    rows+=("$(health_json commands "Recovery tools" error "Required commands are missing" "$missing")")
+  fi
+
+  json_lines_to_array "${rows[@]}" |
+    jq -c \
+      --argjson schemaVersion "$SCHEMA_VERSION" \
+      --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,health:.,errors:[]}'
+}
+
+validate_target() {
+  local adapter="$1" target="$2"
+  local desktop_file
+  [[ ${#target} -le 240 ]] || { echo "Target is too long" >&2; return 1; }
+  [[ $target != *$'\n'* && $target != *$'\r'* && $target != *'/'* && $target != *'..'* ]] || {
+    echo "Unsafe target" >&2
+    return 1
+  }
+
+  case "$adapter" in
+    package)
+      [[ $target =~ ^[A-Za-z0-9@._+:-]+$ ]] && pacman -Q "$target" >/dev/null 2>&1
+      ;;
+    plugin)
+      [[ $target =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] &&
+        omarchy plugin list --json 2>/dev/null |
+          jq -e --arg id "$target" '.[] | select(.id == $id and (.firstParty | not))' >/dev/null
+      ;;
+    flatpak)
+      [[ $target =~ ^[A-Za-z0-9][A-Za-z0-9._-]+$ ]] && flatpak info "$target" >/dev/null 2>&1
+      ;;
+    webapp)
+      [[ -n $target && $target != *[[:cntrl:]]* ]]
+      desktop_file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$target.desktop"
+      [[ -f $desktop_file ]] && grep -qE '^Exec=.*(omarchy-launch-webapp|omarchy-webapp-handler)' "$desktop_file"
+      ;;
+    tui)
+      [[ -n $target && $target != *[[:cntrl:]]* ]]
+      desktop_file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$target.desktop"
+      [[ -f $desktop_file ]] && grep -qE '^Exec=.*(\$TERMINAL|xdg-terminal-exec).*(-e|-[[:alpha:]]*e)([[:space:]]|$)' "$desktop_file"
+      ;;
+    launcher)
+      [[ -n $target && $target != *[[:cntrl:]]* ]]
+      desktop_file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$target.desktop"
+      [[ -f $desktop_file ]]
+      ;;
+    update|restart-shell|journal-user|journal-system|open-hypr-config|snapshot-create|snapshot-restore|review-orphans|copy-report)
+      [[ $target == _ ]]
+      ;;
+    *)
+      echo "Unknown action adapter: $adapter" >&2
+      return 1
+      ;;
+  esac
+}
+
+action_spec() {
+  local adapter="$1" target="$2"
+  ACTION_LABEL=""
+  ACTION_WORKFLOW=""
+  ACTION_TERMINAL=false
+  ACTION_DESTRUCTIVE=true
+  ACTION_ARGV=()
+
+  case "$adapter" in
+    package)
+      ACTION_LABEL="Open package remover"
+      ACTION_WORKFLOW="Omarchy's package remover will open with $target prefilled. Review Pacman's dependency list before accepting."
+      ACTION_TERMINAL=true
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal env "FZF_DEFAULT_QUERY=$target" omarchy-pkg-remove)
+      ;;
+    webapp)
+      ACTION_LABEL="Remove web app"
+      ACTION_WORKFLOW="Omarchy will remove the $target web app launcher and its managed icon. Browser data remains."
+      ACTION_ARGV=(omarchy webapp remove "$target")
+      ;;
+    tui)
+      ACTION_LABEL="Remove TUI launcher"
+      ACTION_WORKFLOW="Omarchy will remove the $target terminal launcher and its managed icon. The underlying command remains installed."
+      ACTION_ARGV=(omarchy tui remove "$target")
+      ;;
+    plugin)
+      ACTION_LABEL="Open plugin remover"
+      ACTION_WORKFLOW="Omarchy's interactive plugin workflow will disable and remove or back up $target."
+      ACTION_TERMINAL=true
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy plugin remove "$target")
+      ;;
+    flatpak)
+      ACTION_LABEL="Open Flatpak remover"
+      ACTION_WORKFLOW="Flatpak will review and uninstall $target in a terminal."
+      ACTION_TERMINAL=true
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal flatpak uninstall "$target")
+      ;;
+    launcher)
+      ACTION_LABEL="Remove launcher"
+      ACTION_WORKFLOW="Omarchy will remove only the local $target.desktop launcher. The executable and its data remain."
+      ACTION_ARGV=(omarchy-remove-launcher-entry "$target" "$target")
+      ;;
+    update)
+      ACTION_LABEL="Open update workflow"
+      ACTION_WORKFLOW="A terminal will open Omarchy's standard update workflow. It may check the network and request sudo."
+      ACTION_TERMINAL=true
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy update)
+      ;;
+    restart-shell)
+      ACTION_LABEL="Restart shell"
+      ACTION_WORKFLOW="Omarchy-shell will restart. OmaPanel will close with it and can be reopened after the shell returns."
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(omarchy restart shell)
+      ;;
+    journal-user)
+      ACTION_LABEL="View user journal"
+      ACTION_WORKFLOW="A terminal will show warnings from this boot's user journal."
+      ACTION_TERMINAL=true
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal bash -lc 'journalctl --user -b -p warning; printf "\nPress Enter to close..."; read -r')
+      ;;
+    journal-system)
+      ACTION_LABEL="View system journal"
+      ACTION_WORKFLOW="A terminal will show warnings from this boot's system journal."
+      ACTION_TERMINAL=true
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal bash -lc 'journalctl -b -p warning; printf "\nPress Enter to close..."; read -r')
+      ;;
+    open-hypr-config)
+      ACTION_LABEL="Open configuration"
+      ACTION_WORKFLOW="Omarchy will open your Hyprland configuration in the configured editor."
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(omarchy launch config-editor "$HOME/.config/hypr/hyprland.lua")
+      ;;
+    snapshot-create)
+      ACTION_LABEL="Create snapshot"
+      ACTION_WORKFLOW="A terminal will run Omarchy's Snapper snapshot workflow and may request sudo."
+      ACTION_TERMINAL=true
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy snapshot create)
+      ;;
+    snapshot-restore)
+      ACTION_LABEL="Open snapshot restore"
+      ACTION_WORKFLOW="A terminal will open Omarchy's boot snapshot restore workflow. Review the selected snapshot carefully."
+      ACTION_TERMINAL=true
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy snapshot restore)
+      ;;
+    review-orphans)
+      ACTION_LABEL="Review orphaned packages"
+      ACTION_WORKFLOW="A terminal will open Omarchy's interactive orphan package review."
+      ACTION_TERMINAL=true
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy update orphan pkgs)
+      ;;
+    copy-report)
+      ACTION_LABEL="Copy diagnostic report"
+      ACTION_WORKFLOW="OmaPanel will copy a sanitized health summary without logs or personal files."
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(__copy_report__)
+      ;;
+  esac
+}
+
+action_preview() {
+  local adapter="$1" target="$2" argv_json
+  action_spec "$adapter" "$target"
+  argv_json="$(printf '%s\n' "${ACTION_ARGV[@]}" | jq -R . | jq -s '.')"
+  jq -cn \
+    --arg adapter "$adapter" --arg target "$target" \
+    --arg label "$ACTION_LABEL" --arg workflow "$ACTION_WORKFLOW" \
+    --argjson terminal "$ACTION_TERMINAL" --argjson destructive "$ACTION_DESTRUCTIVE" \
+    --argjson argv "$argv_json" \
+    '{ok:true,adapter:$adapter,target:$target,label:$label,workflow:$workflow,
+      terminal:$terminal,destructive:$destructive,argv:$argv}'
+}
+
+copy_report() {
+  local report
+  report="$(collect_health | jq -r '
+    "OmaPanel diagnostic report\nGenerated: " + .generatedAt + "\n" +
+    (.health | map("[" + (.status | ascii_upcase) + "] " + .title + ": " + .summary) | join("\n"))')"
+  printf '%s\n' "$report" | wl-copy
+  jq -cn '{ok:true,message:"Diagnostic report copied to the clipboard."}'
+}
+
+run_action() {
+  local dry_run="$1" adapter="$2" target="$3"
+  validate_target "$adapter" "$target" || exit 2
+  if [[ $dry_run == true ]]; then
+    action_preview "$adapter" "$target"
+    return
+  fi
+
+  action_spec "$adapter" "$target"
+  if [[ ${ACTION_ARGV[0]} == __copy_report__ ]]; then
+    copy_report
+    return
+  fi
+  exec "${ACTION_ARGV[@]}"
+}
+
+main() {
+  case "${1:-}" in
+    collect)
+      case "${2:-}" in
+        programs)
+          if [[ ${3:-} == --jsonl ]]; then
+            collect_programs | jq -c '.programs[]'
+          elif [[ -z ${3:-} ]]; then
+            collect_programs
+          else
+            usage
+            exit 2
+          fi
+          ;;
+        health) collect_health ;;
+        *) usage; exit 2 ;;
+      esac
+      ;;
+    action)
+      shift
+      local dry_run=false
+      if [[ ${1:-} == --dry-run ]]; then
+        dry_run=true
+        shift
+      fi
+      [[ $# == 2 ]] || { usage; exit 2; }
+      run_action "$dry_run" "$1" "$2"
+      ;;
+    -h|--help|"") usage ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+main "$@"

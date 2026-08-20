@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Fixture Web
+Comment=A managed web application
+Icon=fixture-web
+Exec=omarchy-launch-webapp "https://example.test"

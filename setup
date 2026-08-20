@@ -1,0 +1,295 @@
+#!/bin/bash
+
+set -euo pipefail
+
+PLUGIN_ID="spaskich.omapanel"
+SUMMON="omarchy-shell shell toggle $PLUGIN_ID '{}'"
+CONFIG_HOME="${OMAPANEL_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}"
+MENU_FILE="$CONFIG_HOME/omarchy/extensions/omarchy-menu.jsonc"
+BINDINGS_FILE="$CONFIG_HOME/hypr/bindings.lua"
+NO_KEYBIND=false
+REMOVE=false
+SKIP_RUNTIME="${OMAPANEL_SKIP_RUNTIME:-false}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./setup [--no-keybind] [--remove]
+
+Adds OmaPanel to the Omarchy Setup menu and, when SUPER+I is free, adds the
+keyboard shortcut. Changes are marked, backed up, idempotent, and reversible.
+EOF
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --no-keybind) NO_KEYBIND=true ;;
+    --remove) REMOVE=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+timestamp="$(date -u +%Y%m%d%H%M%S%N)"
+declare -a created_files=()
+declare -a backup_files=()
+declare -a backup_sources=()
+
+backup_file() {
+  local file="$1"
+  if [[ -e $file ]]; then
+    local backup="$file.omapanel.bak.$timestamp"
+    cp -p "$file" "$backup"
+    backup_sources+=("$file")
+    backup_files+=("$backup")
+    echo "Backed up $file -> $backup"
+  else
+    created_files+=("$file")
+  fi
+}
+
+rollback() {
+  local i
+  for (( i = 0; i < ${#backup_files[@]}; i++ )); do
+    cp -p "${backup_files[$i]}" "${backup_sources[$i]}"
+  done
+  for file in "${created_files[@]}"; do
+    rm -f "$file"
+  done
+}
+
+ensure_base_files() {
+  mkdir -p "${MENU_FILE%/*}" "${BINDINGS_FILE%/*}"
+  if [[ ! -e $MENU_FILE ]]; then
+    printf '{\n}\n' >"$MENU_FILE"
+  fi
+  if [[ ! -e $BINDINGS_FILE ]]; then
+    printf '%s\n' '-- Personal Omarchy keybindings.' >"$BINDINGS_FILE"
+  fi
+}
+
+edit_menu() {
+  local mode="$1"
+  python3 - "$MENU_FILE" "$mode" "$SUMMON" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+mode = sys.argv[2]
+summon = sys.argv[3]
+start = "  // >>> OmaPanel (managed by setup)"
+end = "  // <<< OmaPanel"
+raw = path.read_text()
+
+def strip_jsonc(text):
+    out = []
+    i = 0
+    quote = None
+    escaped = False
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if quote:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            out.append(ch)
+            i += 1
+        elif ch == "/" and nxt == "/":
+            i += 2
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+        elif ch == "/" and nxt == "*":
+            i += 2
+            while i + 1 < len(text) and text[i:i+2] != "*/":
+                i += 1
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    cleaned = "".join(out)
+    return re.sub(r",\s*([}\]])", r"\1", cleaned)
+
+def validate(text):
+    value = json.loads(strip_jsonc(text))
+    if not isinstance(value, dict):
+        raise ValueError("menu extension root must be an object")
+    return value
+
+def managed_pattern():
+    return re.compile(r"\n?[ \t]*// >>> OmaPanel \(managed by setup\).*?\n[ \t]*// <<< OmaPanel\n?", re.S)
+
+existing = validate(raw)
+has_managed = bool(managed_pattern().search(raw))
+
+if mode == "remove":
+    if has_managed:
+        raw = managed_pattern().sub("\n", raw)
+        # The block owns its leading comma. Removing it can expose a comma
+        # immediately before the root closing brace; JSONC accepts that, and
+        # validation below confirms the remaining user document is sound.
+        validate(raw)
+        path.write_text(raw)
+    sys.exit(0)
+
+if "setup.omapanel" in existing and not has_managed:
+    raise SystemExit("setup.omapanel already exists outside OmaPanel's managed block")
+if has_managed:
+    sys.exit(0)
+
+depth = 0
+quote = None
+escaped = False
+line_comment = False
+block_comment = False
+root_close = None
+for i, ch in enumerate(raw):
+    nxt = raw[i + 1] if i + 1 < len(raw) else ""
+    if line_comment:
+        if ch in "\r\n": line_comment = False
+        continue
+    if block_comment:
+        if ch == "*" and nxt == "/": block_comment = False
+        continue
+    if quote:
+        if escaped: escaped = False
+        elif ch == "\\": escaped = True
+        elif ch == quote: quote = None
+        continue
+    if ch in ('"', "'"): quote = ch
+    elif ch == "/" and nxt == "/": line_comment = True
+    elif ch == "/" and nxt == "*": block_comment = True
+    elif ch == "{": depth += 1
+    elif ch == "}":
+        depth -= 1
+        if depth == 0:
+            root_close = i
+
+if root_close is None:
+    raise SystemExit("could not find the menu extension's root closing brace")
+
+before_close = raw[:root_close].rstrip()
+prefix = "," if existing and not before_close.endswith(",") else ""
+entry = {
+    "icon": "󰒓",
+    "label": "OmaPanel",
+    "description": "The Omarchy Control Center",
+    "action": summon,
+}
+block = "\n" + prefix + start + "\n  \"setup.omapanel\": " + json.dumps(entry, ensure_ascii=False) + "\n" + end + "\n"
+updated = before_close + block + raw[root_close:]
+validate(updated)
+path.write_text(updated)
+PY
+}
+
+remove_binding_block() {
+  python3 - "$BINDINGS_FILE" <<'PY'
+import re
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+raw = path.read_text()
+raw = re.sub(r"\n?-- >>> OmaPanel \(managed by setup\).*?\n-- <<< OmaPanel\n?", "\n", raw, flags=re.S)
+path.write_text(raw.rstrip() + "\n")
+PY
+}
+
+super_i_free() {
+  if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    ! hyprctl binds -j 2>/dev/null |
+      jq -e '.[] | select(((.key // "") | ascii_upcase) == "I" and (.modmask == 64))' >/dev/null
+    return
+  fi
+
+  if command -v omarchy >/dev/null 2>&1; then
+    ! omarchy menu keybindings --print 2>/dev/null |
+      awk '$1 == "SUPER" && $2 == "+" && $3 == "I" { found=1 } END { exit !found }'
+    return
+  fi
+
+  return 1
+}
+
+add_binding_block() {
+  grep -q '^-- >>> OmaPanel (managed by setup)$' "$BINDINGS_FILE" && return
+  cat >>"$BINDINGS_FILE" <<EOF
+
+-- >>> OmaPanel (managed by setup)
+o.bind("SUPER + I", "OmaPanel", "$SUMMON")
+-- <<< OmaPanel
+EOF
+}
+
+if $REMOVE; then
+  if [[ -e $MENU_FILE ]]; then
+    backup_file "$MENU_FILE"
+    edit_menu remove
+  fi
+  if [[ -e $BINDINGS_FILE ]]; then
+    backup_file "$BINDINGS_FILE"
+    remove_binding_block
+  fi
+  if [[ $SKIP_RUNTIME != true ]] && command -v hyprctl >/dev/null 2>&1; then
+    hyprctl reload >/dev/null
+  fi
+  echo "Removed OmaPanel's menu entry and managed keybinding. The plugin remains installed."
+  exit 0
+fi
+
+backup_file "$MENU_FILE"
+backup_file "$BINDINGS_FILE"
+ensure_base_files
+
+before_errors=""
+if [[ $SKIP_RUNTIME != true ]] && command -v hyprctl >/dev/null 2>&1; then
+  before_errors="$(hyprctl configerrors 2>/dev/null || true)"
+fi
+
+if ! edit_menu add; then
+  rollback
+  echo "Could not update the Omarchy menu; restored the previous files." >&2
+  exit 1
+fi
+
+keybind_added=false
+if [[ $NO_KEYBIND != true ]]; then
+  if super_i_free; then
+    add_binding_block
+    keybind_added=true
+  else
+    echo "SUPER+I is already in use or could not be verified; installed the menu entry only."
+  fi
+fi
+
+if [[ $SKIP_RUNTIME != true ]]; then
+  if command -v omarchy >/dev/null 2>&1; then
+    omarchy plugin enable "$PLUGIN_ID" >/dev/null
+  fi
+  if command -v hyprctl >/dev/null 2>&1; then
+    hyprctl reload >/dev/null
+    after_errors="$(hyprctl configerrors 2>/dev/null || true)"
+    if [[ -n $after_errors && $after_errors != "$before_errors" ]]; then
+      rollback
+      hyprctl reload >/dev/null || true
+      echo "Hyprland reported a new configuration error; restored the previous files." >&2
+      echo "$after_errors" >&2
+      exit 1
+    fi
+  fi
+fi
+
+echo "OmaPanel is available under Setup -> OmaPanel."
+if $keybind_added; then
+  echo "Keyboard shortcut: SUPER+I"
+fi
