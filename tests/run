@@ -18,11 +18,17 @@ cp "$ROOT"/tests/fixtures/system/share/applications/*.desktop "$TMP/system/share
 cat >"$TMP/bin/pacman" <<'EOF'
 #!/bin/bash
 case "${1:-}" in
+  -Ql)
+    printf 'fixture-package %s\n' \
+      "$XDG_DATA_DIRS/applications/fixture-package.desktop" \
+      "$XDG_DATA_DIRS/applications/fixture-package-helper.desktop" \
+      "$XDG_DATA_DIRS/applications/fixture-package-hidden.desktop"
+    ;;
   -Qqm) printf '%s\n' fixture-package ;;
   -Qqe) printf '%s\n' fixture-package ;;
   -Qqdt) exit 1 ;;
   -Qqo)
-    [[ ${2:-} == *fixture-package.desktop ]] && { echo fixture-package; exit 0; }
+    [[ ${2:-} == *fixture-package*.desktop ]] && { echo fixture-package; exit 0; }
     exit 1
     ;;
   -Q)
@@ -54,20 +60,56 @@ EOF
 
 cat >"$TMP/bin/hyprctl" <<'EOF'
 #!/bin/bash
-if [[ ${1:-} == binds ]]; then echo '[]'; else exit 0; fi
+if [[ ${1:-} == binds ]]; then
+  echo '[]'
+elif [[ ${1:-} == configerrors && -n ${FIXTURE_HYPR_ERRORS:-} ]]; then
+  printf '%s\n' "$FIXTURE_HYPR_ERRORS"
+else
+  exit 0
+fi
 EOF
 
 cat >"$TMP/bin/systemctl" <<'EOF'
 #!/bin/bash
+[[ -z ${FIXTURE_SYSTEMCTL_SLEEP:-} ]] || sleep "$FIXTURE_SYSTEMCTL_SLEEP"
+if [[ -n ${FIXTURE_SYSTEMCTL_FAILURE:-} ]]; then
+  printf '%s\n' "$FIXTURE_SYSTEMCTL_FAILURE"
+fi
 exit 0
 EOF
 
-for name in omarchy-shell wl-copy xdg-terminal-exec snapper; do
+cat >"$TMP/bin/mise" <<'EOF'
+#!/bin/bash
+if [[ ${FIXTURE_MISE_FAIL:-false} == true ]]; then exit 1; fi
+if [[ ${1:-} == ls && ${2:-} == --installed && ${3:-} == --json ]]; then
+  cat <<'JSON'
+{"node":[{"version":"22.1.0","installed":true,"active":true,"install_path":"/private/node","source":{"path":"/private/mise.toml"}},{"version":"20.0.0","installed":true,"active":false}],"python":[{"version":"3.13.0","installed":false,"active":true}]}
+JSON
+else
+  exit 1
+fi
+EOF
+
+for name in omarchy-shell xdg-terminal-exec snapper; do
   cat >"$TMP/bin/$name" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
 done
+
+cat >"$TMP/bin/omarchy-shell" <<'EOF'
+#!/bin/bash
+[[ ${FIXTURE_SHELL_FAIL:-false} != true ]]
+EOF
+
+cat >"$TMP/bin/wl-copy" <<'EOF'
+#!/bin/bash
+if [[ -n ${FIXTURE_CLIPBOARD:-} ]]; then
+  tee "$FIXTURE_CLIPBOARD" >/dev/null
+else
+  cat >/dev/null
+fi
+EOF
 chmod +x "$TMP/bin"/*
 
 export PATH="$TMP/bin:/usr/bin:/bin"
@@ -76,18 +118,70 @@ export XDG_DATA_HOME="$TMP/home/.local/share"
 export XDG_DATA_DIRS="$TMP/system/share"
 
 programs="$("$ROOT/scripts/omapanel-backend" collect programs)"
-jq -e '.schemaVersion == 1 and (.programs | length) == 7' <<<"$programs" >/dev/null || fail "unexpected program count"
+jq -e '.schemaVersion == 1 and (.programs | length) == 10' <<<"$programs" >/dev/null || fail "unexpected program count"
 jq -e '.programs[] | select(.id == "desktop:fixture-web" and .kind == "webapp" and .actionAdapter == "webapp")' <<<"$programs" >/dev/null || fail "web app classification"
 jq -e '.programs[] | select(.id == "desktop:fixture-tui" and .kind == "tui")' <<<"$programs" >/dev/null || fail "TUI classification"
 jq -e '.programs[] | select(.id == "desktop:fixture-package" and .sourceId == "fixture-package")' <<<"$programs" >/dev/null || fail "package ownership"
 jq -e '.programs[] | select(.id == "plugin:fixture.community" and .removable == true)' <<<"$programs" >/dev/null || fail "community plugin"
 jq -e '.programs[] | select(.id == "plugin:omarchy.fixture" and .protected == true)' <<<"$programs" >/dev/null || fail "protected plugin"
+jq -e '.programs[] | select(.id == "mise:node@22.1.0" and .kind == "mise" and .active == true and .removable == false and .actionAdapter == "")' <<<"$programs" >/dev/null || fail "Mise visibility-only tool"
+jq -e '.programs[] | select(.id == "package:fixture-package" and .impactLauncherCount == 3 and (.impactLauncherNames | index("Fixture Package Hidden Helper")))' <<<"$programs" >/dev/null || fail "package launcher impact"
+jq -e '.providers.mise == "ok" and (.errors | length) == 0' <<<"$programs" >/dev/null || fail "Mise provider status"
 
-health="$("$ROOT/scripts/omapanel-backend" collect health)"
-jq -e '.schemaVersion == 1 and (.health | length) >= 10' <<<"$health" >/dev/null || fail "health schema"
+programs_without_mise="$(FIXTURE_MISE_FAIL=true "$ROOT/scripts/omapanel-backend" collect programs)"
+jq -e '.providers.mise == "error" and (.errors[] | select(.provider == "mise")) and ([.programs[] | select(.kind == "mise")] | length == 0) and ([.programs[] | select(.kind == "app")] | length > 0)' <<<"$programs_without_mise" >/dev/null || fail "Mise provider failure isolation"
+
+doctor="$("$ROOT/scripts/omapanel-backend" collect doctor)"
+jq -e '.schemaVersion == 2 and (.checks | length) == 11 and .overall.counts.total == 11' <<<"$doctor" >/dev/null || fail "Doctor schema"
+jq -e '.checks[] | select(.id == "hyprland" and .status == "ok")' <<<"$doctor" >/dev/null || fail "Doctor healthy check"
+
+timed_doctor="$(FIXTURE_SYSTEMCTL_SLEEP=0.2 OMAPANEL_CHECK_TIMEOUT=0.05 "$ROOT/scripts/omapanel-backend" collect doctor)"
+jq -e '[.checks[] | select((.id == "user-services" or .id == "system-services") and .status == "unknown" and .failureReason == "timeout")] | length == 2' <<<"$timed_doctor" >/dev/null || fail "Doctor timeout isolation"
+jq -e '.checks[] | select(.id == "hyprland" and .status == "ok")' <<<"$timed_doctor" >/dev/null || fail "Doctor timeout discarded successful checks"
+
+privacy_canary="private-user private-host /home/private-user 192.0.2.44 SecretSSID journal-auth-token"
+set +e
+doctor_json="$(FIXTURE_HYPR_ERRORS="$privacy_canary" FIXTURE_SYSTEMCTL_FAILURE="$privacy_canary" "$ROOT/bin/omapanel" doctor --json)"
+doctor_rc=$?
+set -e
+[[ $doctor_rc == 2 ]] || fail "Doctor error exit code"
+jq -e '.schemaVersion == 1 and .kind == "omapanel.doctor" and (.checks | length) == 11' <<<"$doctor_json" >/dev/null || fail "public Doctor JSON schema"
+[[ $doctor_json != *private-user* && $doctor_json != *private-host* && $doctor_json != *192.0.2.44* && $doctor_json != *SecretSSID* && $doctor_json != *journal-auth-token* ]] || fail "Doctor report leaked private detail"
+
+set +e
+private_human="$(FIXTURE_HYPR_ERRORS="$privacy_canary" FIXTURE_SYSTEMCTL_FAILURE="$privacy_canary" "$ROOT/bin/omapanel" doctor)"
+private_human_rc=$?
+set -e
+[[ $private_human_rc == 2 ]] || fail "human Doctor severity"
+[[ $private_human != *private-user* && $private_human != *private-host* && $private_human != *192.0.2.44* && $private_human != *SecretSSID* && $private_human != *journal-auth-token* ]] || fail "human Doctor report leaked private detail"
+
+set +e
+doctor_human="$(FIXTURE_SHELL_FAIL=true "$ROOT/bin/omapanel" doctor)"
+doctor_human_rc=$?
+set -e
+[[ $doctor_human_rc == 1 ]] || fail "Doctor warning exit code"
+[[ $doctor_human == *"OmaPanel Doctor"* ]] || fail "human Doctor report"
+
+report_file="$TMP/doctor.json"
+set +e
+"$ROOT/bin/omapanel" doctor --json --output "$report_file" >/dev/null
+report_rc=$?
+set -e
+[[ $report_rc == 1 && -f $report_file && $(stat -c '%a' "$report_file") == 600 ]] || fail "Doctor report file"
+if "$ROOT/bin/omapanel" doctor --json --output "$report_file" >/dev/null 2>&1; then
+  fail "Doctor overwrote an existing report"
+fi
+
+export FIXTURE_CLIPBOARD="$TMP/clipboard"
+set +e
+"$ROOT/bin/omapanel" doctor --copy >/dev/null
+copy_rc=$?
+set -e
+[[ $copy_rc == 1 && -s $FIXTURE_CLIPBOARD ]] || fail "Doctor clipboard report"
+unset FIXTURE_CLIPBOARD
 
 preview="$("$ROOT/scripts/omapanel-backend" action --dry-run package fixture-package)"
-jq -e '.ok and .terminal and (.argv | index("FZF_DEFAULT_QUERY=fixture-package"))' <<<"$preview" >/dev/null || fail "package preview"
+jq -e '.ok and .terminal and (.argv | index("FZF_DEFAULT_QUERY=fixture-package")) and (.argv | index("omarchy")) and (.argv | index("pkg")) and (.argv | index("remove")) and (.impactedLaunchers | length) == 3' <<<"$preview" >/dev/null || fail "package preview"
 web_preview="$("$ROOT/scripts/omapanel-backend" action --dry-run webapp fixture-web)"
 jq -e '.ok and (.argv | index("fixture-web"))' <<<"$web_preview" >/dev/null || fail "web app preview"
 if "$ROOT/scripts/omapanel-backend" action --dry-run package '../unsafe' >/dev/null 2>&1; then
@@ -108,9 +202,19 @@ OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" >/dev/nu
 [[ $(grep -c 'setup.omapanel' "$config/omarchy/extensions/omarchy-menu.jsonc") == 1 ]] || fail "menu setup is not idempotent"
 [[ $(grep -c '^o.bind("SUPER + I"' "$config/hypr/bindings.lua") == 1 ]] || fail "binding setup is not idempotent"
 grep -q 'https://example.test/a//b' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "JSONC string changed"
+[[ -L $HOME/.local/bin/omapanel && $(readlink -f "$HOME/.local/bin/omapanel") == "$ROOT/bin/omapanel" ]] || fail "CLI link setup"
+[[ $("$HOME/.local/bin/omapanel" --version) == 0.2.0 ]] || fail "linked CLI execution"
 OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" --remove >/dev/null
 ! grep -q 'setup.omapanel' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "menu removal failed"
 ! grep -q '^o.bind("SUPER + I"' "$config/hypr/bindings.lua" || fail "binding removal failed"
+[[ ! -e $HOME/.local/bin/omapanel && ! -L $HOME/.local/bin/omapanel ]] || fail "CLI link removal failed"
+
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/bash\n' >"$HOME/.local/bin/omapanel"
+if OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" >/dev/null 2>&1; then
+  fail "setup replaced an unrelated CLI command"
+fi
+[[ ! -L $HOME/.local/bin/omapanel ]] || fail "unrelated CLI command became a symlink"
 
 if command -v qmltestrunner >/dev/null 2>&1; then
   QT_QPA_PLATFORM=offscreen qmltestrunner -input "$ROOT/tests/tst_model.qml"

@@ -10,10 +10,15 @@
 
 ## v0.2 — Reliability and terminal recovery
 
-- Add `omapanel doctor` using the existing health collectors when Quattro is
-  unavailable.
-- Improve multi-launcher package impact and add Mise-managed tools.
-- Export a structured, privacy-reviewed report for upstream bug templates.
+- Make Doctor a dedicated panel page backed by isolated, timeout-bounded
+  checks with partial results and explicit recommendations.
+- Add `omapanel doctor` for terminal and SSH recovery when Quattro is
+  unavailable, without adding repair or privilege modes.
+- Export human and structured privacy-reviewed reports only to destinations
+  explicitly selected by the user.
+- Show complete discovered launcher impact for package removal and add
+  visibility-only Mise-managed tools.
+- Install the CLI through a reversible, ownership-checked user symlink.
 - Propose canonical `omarchy software list --json` and removal-routing commands
   so ownership logic can eventually leave the plugin.
 

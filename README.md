@@ -9,25 +9,29 @@ state without privilege, explains ownership and impact, previews every action,
 then delegates to Pacman, Flatpak, Snapper, systemd, or the existing Omarchy
 command that already owns the operation.
 
-## Proof-of-concept features
+## Features
 
-- Responsive Overview, Programs, and Health & Recovery pages.
+- Responsive Overview, Programs, and Doctor pages.
 - Live Omarchy theme, type-scale, spacing, focus, and surface colors.
 - Applications, web apps, TUI launchers, plugins, Flatpaks, local launchers,
   and an opt-in advanced Pacman/AUR package list.
 - Package/launcher ownership and protected first-party components.
-- Hyprland, systemd, disk usage, Snapper configuration, restart state, Pacman
-  lock, orphan package, and recovery-tool checks.
-- Sanitized clipboard report and safe handoffs to update, journals, snapshots,
-  configuration, package review, and shell restart workflows.
+- Isolated Hyprland, Quattro, systemd, disk, Snapper, restart, Pacman, and
+  OmaPanel checks with per-provider timeouts and honest unknown states.
+- Shell-independent terminal Doctor with sanitized human and JSON reports.
+- Package removal impact across every discovered launcher, including hidden
+  entries, plus read-only Mise tool visibility.
+- Privacy-reviewed clipboard reports and safe handoffs to existing Omarchy
+  update, journal, configuration, and recovery workflows.
 - Full keyboard navigation with the same selection model used by mouse hover.
 - Idempotent, backed-up, reversible menu and keybinding setup.
 
 ## Requirements
 
 - Omarchy 4.x with the Quattro shell.
-- `bash`, `jq`, Pacman, and the standard Omarchy commands.
-- Flatpak is optional and disappears cleanly when unavailable.
+- `bash`, `jq`, GNU `timeout`, Pacman, and the standard Omarchy commands.
+- Flatpak and Mise are optional and disappear or degrade cleanly when
+  unavailable.
 
 OmaPanel does not support pre-Quattro Omarchy releases.
 
@@ -39,8 +43,9 @@ omarchy plugin add https://github.com/spaskich/omapanel.git --enable
 ```
 
 The second command is explicit because Omarchy never runs plugin install
-hooks. It adds **Setup → OmaPanel** and adds `Super+I` only if the shortcut is
-free. Existing bindings are never overwritten.
+hooks. It adds **Setup → OmaPanel**, links `omapanel` into `~/.local/bin`, and
+adds `Super+I` only if the shortcut is free. Existing bindings and unrelated
+commands are never overwritten.
 
 Install without a shortcut:
 
@@ -54,7 +59,7 @@ Open it directly at any time:
 omarchy-shell shell toggle spaskich.omapanel '{}'
 ```
 
-Remove only the managed menu/keybinding integration:
+Remove the managed menu, keybinding, and CLI integration first:
 
 ```bash
 ~/.config/omarchy/plugins/spaskich.omapanel/setup --remove
@@ -65,6 +70,43 @@ Then remove the plugin through Omarchy:
 ```bash
 omarchy plugin remove spaskich.omapanel
 ```
+
+Removing the plugin first can leave a harmless dangling CLI symlink; running
+`setup --remove` first keeps the lifecycle completely clean.
+
+## Doctor
+
+The graphical Doctor runs automatically when OmaPanel opens and can be run
+again from its page or with `Ctrl+R`. The terminal Doctor uses the same checks
+without depending on Quattro:
+
+```bash
+omapanel doctor
+```
+
+Use the output formats deliberately:
+
+```bash
+omapanel doctor --json                 # Structured stdout for jq or tooling
+omapanel doctor --copy                 # Sanitized human report to clipboard
+omapanel doctor --output report.txt    # New private text file (mode 0600)
+omapanel doctor --json --output report.json
+```
+
+Human output is for terminal diagnosis and sharing with another person. JSON
+is for tests, scripts, issue-template tooling, or a file the user deliberately
+attaches to a report. OmaPanel never uploads either format. JSON goes only to
+stdout or the explicitly selected path.
+
+Doctor exits with `0` for healthy/informational results, `1` for warnings or
+unknown checks, `2` for a confirmed error, and `3` when Doctor itself cannot
+run or write the requested destination. Existing output files are never
+overwritten.
+
+Shareable reports exclude usernames, hostnames, absolute home paths, network
+identifiers, environment/process arguments, journals, and authentication
+material. Exact local detail remains inside the graphical result where it is
+useful for diagnosis.
 
 ## Controls
 
@@ -94,10 +136,15 @@ right-click.
   review may be required.
 - First-party plugins are visible but protected.
 - “Remove launcher” never claims to uninstall an unknown executable.
+- Doctor has no `--fix` mode and never restarts, edits, deletes, updates, or
+  restores anything.
+- Doctor handoffs only open allowlisted, existing workflows after an explicit
+  preview; treatment remains owned by the system tool.
+- Mise versions are visibility-only because `mise uninstall` does not update
+  the configuration files that requested a tool.
 
-The graphical panel runs inside `omarchy-shell`; it cannot appear when that
-process is completely unavailable. A terminal `omapanel doctor` using the same
-collectors is planned for the next milestone.
+The graphical panel runs inside `omarchy-shell`; when that process is
+unavailable, `omapanel doctor` remains usable from a terminal or SSH session.
 
 ## Development and tests
 
@@ -113,6 +160,6 @@ anything. See [Architecture](docs/ARCHITECTURE.md) and
 
 ## Status
 
-OmaPanel is an early proof of concept. The goal is a useful community release
+OmaPanel is an early community project. The goal is a useful release
 whose code and interaction model can become a credible proposal for Omarchy
 core—not a parallel settings ecosystem.

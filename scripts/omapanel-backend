@@ -2,14 +2,22 @@
 
 set -euo pipefail
 
-SCHEMA_VERSION=1
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROGRAM_SCHEMA_VERSION=1
+DOCTOR_SCHEMA_VERSION=2
+DOCTOR_REPORT_SCHEMA_VERSION=1
+CHECK_TIMEOUT="${OMAPANEL_CHECK_TIMEOUT:-3}"
+[[ $CHECK_TIMEOUT =~ ^[0-9]+([.][0-9]+)?$ ]] || CHECK_TIMEOUT=3
+OMAPANEL_VERSION="$(jq -r '.version // "unknown"' "$ROOT/manifest.json" 2>/dev/null || printf unknown)"
 
 usage() {
   cat <<'EOF'
 Usage:
   omapanel-backend collect programs
   omapanel-backend collect programs --jsonl
+  omapanel-backend collect doctor
   omapanel-backend collect health
+  omapanel-backend doctor [--json] [--copy | --output <path>]
   omapanel-backend action [--dry-run] <adapter> <target>
 EOF
 }
@@ -38,6 +46,18 @@ desktop_value() {
       }
     }
   ' "$file"
+}
+
+application_dirs() {
+  local dir
+  local -a system_data_dirs=()
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  printf '%s\n' "$HOME/.local/share/flatpak/exports/share/applications"
+  IFS=: read -ra system_data_dirs <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for dir in "${system_data_dirs[@]}"; do
+    printf '%s\n' "$dir/applications"
+  done
+  printf '%s\n' /var/lib/flatpak/exports/share/applications
 }
 
 program_json() {
@@ -73,10 +93,12 @@ program_json() {
 }
 
 collect_desktop_programs() {
+  local package_owners="${1:-}"
   local -a rows=()
   local -a data_dirs=()
   local -A seen=()
   local -A foreign=()
+  local -A owner_by_path=()
   local file dir desktop_id name description icon exec_line hidden no_display
   local kind source source_id version removable protected adapter target label workflow warning
   local package_owner flatpak_id x_flatpak
@@ -84,14 +106,11 @@ collect_desktop_programs() {
   while IFS= read -r package_owner; do
     [[ -n $package_owner ]] && foreign["$package_owner"]=1
   done < <(pacman -Qqm 2>/dev/null || true)
+  while IFS=$'\t' read -r package_owner file; do
+    [[ -n $package_owner && -n $file ]] && owner_by_path["$file"]="$package_owner"
+  done <<<"$package_owners"
 
-  data_dirs+=("${XDG_DATA_HOME:-$HOME/.local/share}/applications")
-  data_dirs+=("$HOME/.local/share/flatpak/exports/share/applications")
-  IFS=: read -ra system_data_dirs <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-  for dir in "${system_data_dirs[@]}"; do
-    data_dirs+=("$dir/applications")
-  done
-  data_dirs+=("/var/lib/flatpak/exports/share/applications")
+  mapfile -t data_dirs < <(application_dirs)
 
   shopt -s nullglob
   for dir in "${data_dirs[@]}"; do
@@ -159,7 +178,7 @@ collect_desktop_programs() {
         workflow="A terminal will open the Flatpak uninstall workflow for $flatpak_id."
         warning="Flatpak may offer to remove unused application data or runtimes separately."
         version="$(flatpak info --show-version "$flatpak_id" 2>/dev/null || true)"
-      elif package_owner="$(pacman -Qqo "$file" 2>/dev/null | head -n 1)" && [[ -n $package_owner ]]; then
+      elif package_owner="${owner_by_path[$file]:-}" && [[ -n $package_owner ]]; then
         source_id="$package_owner"
         version="$(pacman -Q "$package_owner" 2>/dev/null | awk '{print $2; exit}')"
         if [[ -n ${foreign[$package_owner]+x} ]]; then
@@ -192,6 +211,52 @@ collect_desktop_programs() {
         "$adapter" "$target" "$label" "$workflow" "$warning" false)")
     done
   done
+  shopt -u nullglob
+
+  json_lines_to_array "${rows[@]}"
+}
+
+package_desktop_owners() {
+  pacman -Ql 2>/dev/null |
+    awk '$2 ~ /\/share\/applications\/[^/]+[.]desktop$/ {print $1 "\t" $2}'
+}
+
+collect_package_launcher_impact() {
+  local package_owners="${1:-}"
+  local -a rows=()
+  local -A seen=()
+  local -A owner_by_path=()
+  local dir file desktop_id name hidden no_display package_owner visible impact_id
+
+  while IFS=$'\t' read -r package_owner file; do
+    [[ -n $package_owner && -n $file ]] && owner_by_path["$file"]="$package_owner"
+  done <<<"$package_owners"
+
+  shopt -s nullglob
+  while IFS= read -r dir; do
+    [[ -d $dir ]] || continue
+    for file in "$dir"/*.desktop; do
+      desktop_id="${file##*/}"
+      desktop_id="${desktop_id%.desktop}"
+      package_owner="${owner_by_path[$file]:-}"
+      [[ -n $package_owner ]] || continue
+      impact_id="$package_owner:$desktop_id"
+      [[ -n ${seen[$impact_id]+x} ]] && continue
+      seen["$impact_id"]=1
+      name="$(desktop_value "$file" Name)"
+      [[ -n $name ]] || name="$desktop_id"
+      hidden="$(desktop_value "$file" Hidden)"
+      no_display="$(desktop_value "$file" NoDisplay)"
+      visible=true
+      if [[ ${hidden,,} == true || ${no_display,,} == true ]]; then
+        visible=false
+      fi
+      rows+=("$(jq -cn \
+        --arg package "$package_owner" --arg id "$desktop_id" --arg name "$name" \
+        --argjson visible "$visible" \
+        '{package:$package,id:$id,name:$name,visible:$visible}')")
+    done
+  done < <(application_dirs)
   shopt -u nullglob
 
   json_lines_to_array "${rows[@]}"
@@ -267,141 +332,671 @@ collect_explicit_packages() {
         })'
 }
 
+collect_mise_tools() {
+  local raw="$1"
+  jq -c '
+    to_entries
+    | map(.key as $tool
+        | .value[]
+        | select(.installed == true)
+        | {
+            id:("mise:" + $tool + "@" + .version),
+            name:($tool + " " + .version),
+            description:"Development tool managed by Mise",
+            icon:"󰏗", kind:"mise", source:"Mise-managed tool",
+            sourceId:($tool + "@" + .version), version:.version,
+            removable:false, protected:false,
+            actionAdapter:"", actionTarget:"", actionLabel:"",
+            workflow:"Mise owns this tool version. OmaPanel does not remove it because active mise.toml files may still request it.",
+            warning:"Visibility only: mise uninstall removes files without updating the configuration that requested them.",
+            advanced:true, active:(.active // false),
+            impactLauncherIds:[], impactLauncherNames:[], impactLauncherCount:0,
+            searchText:([$tool,.version,"mise","development tool",(if .active then "active" else "inactive" end)] | join(" ") | ascii_downcase)
+          })
+    | sort_by(.name | ascii_downcase)
+  ' <<<"$raw"
+}
+
 collect_programs() {
-  local desktops plugins flatpaks packages combined
-  desktops="$(collect_desktop_programs)"
+  local desktops plugins flatpaks packages mise_tools impact combined package_owners
+  local mise_state="unavailable" mise_error="" mise_raw=""
+  package_owners="$(package_desktop_owners)"
+  desktops="$(collect_desktop_programs "$package_owners")"
   plugins="$(collect_plugins)"
   flatpaks="$(collect_flatpaks_without_desktop)"
   packages="$(collect_explicit_packages)"
+  impact="$(collect_package_launcher_impact "$package_owners")"
 
-  combined="$(printf '%s\n%s\n%s\n%s\n' "$desktops" "$plugins" "$flatpaks" "$packages" |
-    jq -cs 'add | unique_by(.id) | sort_by(.name | ascii_downcase)')"
-
-  printf '%s\n' "$combined" | jq -c \
-    --argjson schemaVersion "$SCHEMA_VERSION" \
-    --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,programs:.,
-      providers:{desktopEntries:"ok",packages:"ok",plugins:"ok",
-        flatpak:(if any(.[]; .kind == "flatpak") then "ok" else "unavailable" end)},
-      errors:[]}'
-}
-
-health_json() {
-  local id="$1" title="$2" status="$3" summary="$4" detail="$5"
-  local adapter="${6:-}" target="${7:-}" label="${8:-}" destructive="${9:-false}"
-  jq -cn \
-    --arg id "$id" --arg title "$title" --arg status "$status" \
-    --arg summary "$summary" --arg detail "$detail" \
-    --arg actionAdapter "$adapter" --arg actionTarget "$target" \
-    --arg actionLabel "$label" --argjson destructive "$destructive" \
-    '{id:$id,title:$title,status:$status,summary:$summary,detail:$detail,
-      actionAdapter:$actionAdapter,actionTarget:$actionTarget,
-      actionLabel:$actionLabel,destructive:$destructive}'
-}
-
-disk_health() {
-  local id="$1" title="$2" path="$3" line percent available status summary
-  line="$(df -P -B1 "$path" 2>/dev/null | awk 'NR==2 {print $3, $4, $5}')"
-  if [[ -z $line ]]; then
-    health_json "$id" "$title" unknown "Usage could not be read" "$path"
-    return
-  fi
-  read -r _ available percent <<<"$line"
-  percent="${percent%%%}"
-  if (( percent >= 90 )); then status=error
-  elif (( percent >= 80 )); then status=warning
-  else status=ok
-  fi
-  summary="$percent% used · $(numfmt --to=iec-i --suffix=B "$available" 2>/dev/null || echo "$available bytes") free"
-  health_json "$id" "$title" "$status" "$summary" "$path"
-}
-
-collect_health() {
-  local -a rows=()
-  local version channel packages_date errors failed_user failed_system detail
-  local snapper_configs restart_markers orphan_count missing="" status summary
-
-  version="$(omarchy version 2>/dev/null || true)"
-  channel="$(omarchy version channel 2>/dev/null || true)"
-  packages_date="$(omarchy version pkgs 2>/dev/null || true)"
-  if [[ -n $version ]]; then
-    rows+=("$(health_json omarchy "Omarchy" ok "$version · ${channel:-unknown channel}" "Packages last upgraded: ${packages_date:-unknown}" update _ "Run update")")
-  else
-    rows+=("$(health_json omarchy "Omarchy" error "Version could not be read" "The omarchy command may be unavailable.")")
-  fi
-
-  errors="$(timeout 3 hyprctl configerrors 2>/dev/null || true)"
-  if [[ -z $errors ]]; then
-    rows+=("$(health_json hyprland "Hyprland configuration" ok "No configuration errors" "The active Hyprland configuration parsed successfully.")")
-  else
-    rows+=("$(health_json hyprland "Hyprland configuration" error "Configuration errors detected" "$errors" open-hypr-config _ "Open configuration")")
-  fi
-
-  failed_user="$(timeout 3 systemctl --user --failed --no-legend --plain 2>/dev/null || true)"
-  if [[ -z $failed_user ]]; then
-    rows+=("$(health_json user-services "User services" ok "No failed units" "systemd --user reports no failed units.")")
-  else
-    rows+=("$(health_json user-services "User services" warning "Failed user units detected" "$failed_user" journal-user _ "View journal")")
-  fi
-
-  failed_system="$(timeout 3 systemctl --failed --no-legend --plain 2>/dev/null || true)"
-  if [[ -z $failed_system ]]; then
-    rows+=("$(health_json system-services "System services" ok "No failed units" "systemd reports no failed system units.")")
-  else
-    rows+=("$(health_json system-services "System services" warning "Failed system units detected" "$failed_system" journal-system _ "View journal")")
-  fi
-
-  rows+=("$(disk_health root-disk "Root filesystem" /)")
-  rows+=("$(disk_health home-disk "Home filesystem" "$HOME")")
-
-  if ! command -v snapper >/dev/null 2>&1; then
-    rows+=("$(health_json snapshots "Recovery snapshots" info "Snapper is not installed" "Snapshot actions are unavailable on this system.")")
-  else
-    snapper_configs="$(snapper --csvout list-configs 2>/dev/null | awk -F, 'NR>1 && $1 != "" {print $1}' | paste -sd ', ' -)"
-    if [[ -n $snapper_configs ]]; then
-      rows+=("$(health_json snapshots "Recovery snapshots" ok "Configured for $snapper_configs" "Snapshot contents require elevated permissions and are intentionally not read." snapshot-create _ "Create snapshot")")
+  mise_tools='[]'
+  if command -v mise >/dev/null 2>&1; then
+    if mise_raw="$(timeout --foreground "$CHECK_TIMEOUT" mise ls --installed --json 2>/dev/null)"; then
+      if jq -e 'type == "object"' >/dev/null 2>&1 <<<"$mise_raw"; then
+        mise_tools="$(collect_mise_tools "$mise_raw")"
+        mise_state="ok"
+      else
+        mise_state="error"
+        mise_error="Mise returned an unsupported inventory response."
+      fi
     else
-      rows+=("$(health_json snapshots "Recovery snapshots" warning "Snapper has no configuration" "Updates may not have a usable recovery snapshot.")")
+      case $? in
+        124) mise_state="timeout"; mise_error="Mise inventory timed out." ;;
+        *) mise_state="error"; mise_error="Mise inventory could not be read." ;;
+      esac
     fi
   fi
 
+  combined="$(printf '%s\n%s\n%s\n%s\n%s\n' "$desktops" "$plugins" "$flatpaks" "$packages" "$mise_tools" |
+    jq -cs --argjson impact "$impact" '
+      add
+      | unique_by(.id)
+      | map(
+          if .actionAdapter == "package" then
+            .sourceId as $package
+            | ($impact | map(select(.package == $package))) as $launchers
+            | . + {
+                impactLauncherIds:($launchers | map(.id)),
+                impactLauncherNames:($launchers | map(.name)),
+                impactLauncherCount:($launchers | length)
+              }
+          else
+            . + {
+              impactLauncherIds:(.impactLauncherIds // []),
+              impactLauncherNames:(.impactLauncherNames // []),
+              impactLauncherCount:(.impactLauncherCount // 0)
+            }
+          end)
+      | sort_by(.name | ascii_downcase)')"
+
+  printf '%s\n' "$combined" | jq -c \
+    --argjson schemaVersion "$PROGRAM_SCHEMA_VERSION" \
+    --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg miseState "$mise_state" \
+    --arg miseError "$mise_error" \
+    '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,programs:.,
+      providers:{desktopEntries:"ok",packages:"ok",plugins:"ok",
+        flatpak:(if any(.[]; .kind == "flatpak") then "ok" else "unavailable" end),
+        mise:$miseState},
+      errors:(if $miseError == "" then [] else [{provider:"mise",message:$miseError}] end)}'
+}
+
+doctor_check_json() {
+  local id="$1" category="$2" title="$3" status="$4" summary="$5"
+  local detail="$6" report_summary="$7" recommendation="$8"
+  local adapter="${9:-}" target="${10:-}" label="${11:-}" failure_reason="${12:-}"
+  jq -cn \
+    --arg id "$id" --arg category "$category" --arg title "$title" \
+    --arg status "$status" --arg summary "$summary" --arg detail "$detail" \
+    --arg reportSummary "$report_summary" --arg recommendation "$recommendation" \
+    --arg actionAdapter "$adapter" --arg actionTarget "$target" \
+    --arg actionLabel "$label" --arg failureReason "$failure_reason" \
+    '{id:$id,category:$category,title:$title,status:$status,summary:$summary,
+      detail:$detail,reportSummary:$reportSummary,recommendation:$recommendation,
+      actionAdapter:$actionAdapter,actionTarget:$actionTarget,
+      actionLabel:$actionLabel,failureReason:$failureReason}'
+}
+
+timed_capture() {
+  local variable="$1"
+  shift
+  local output rc
+  set +e
+  output="$(timeout --foreground "$CHECK_TIMEOUT" "$@" 2>/dev/null)"
+  rc=$?
+  set -e
+  printf -v "$variable" '%s' "$output"
+  return "$rc"
+}
+
+check_omarchy() {
+  local version="" channel="" packages_date="" rc
+  if ! command -v omarchy >/dev/null 2>&1; then
+    doctor_check_json omarchy Omarchy Omarchy error \
+      "The Omarchy command is missing" \
+      "OmaPanel could not find the omarchy command on PATH." \
+      "The Omarchy command is unavailable." \
+      "Restore the Omarchy installation before using its recovery workflows." \
+      "" "" "" unavailable
+    return
+  fi
+
+  if timed_capture version omarchy version; then
+    timed_capture channel omarchy version channel || channel="unknown channel"
+    timed_capture packages_date omarchy version pkgs || packages_date="unknown"
+    [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] || version="unknown"
+    [[ $channel =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]] || channel="unknown"
+    doctor_check_json omarchy Omarchy Omarchy ok \
+      "$version · ${channel:-unknown channel}" \
+      "Packages last upgraded: ${packages_date:-unknown}" \
+      "Omarchy ${version:-unknown} is installed on the ${channel:-unknown} channel." \
+      "Use Omarchy's update workflow when you intentionally want to check for updates."
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      doctor_check_json omarchy Omarchy Omarchy unknown \
+        "The version check timed out" \
+        "The omarchy command did not answer within ${CHECK_TIMEOUT}s." \
+        "The Omarchy version check timed out." \
+        "Verify the command from a terminal before attempting an update." \
+        "" "" "" timeout
+    else
+      doctor_check_json omarchy Omarchy Omarchy unknown \
+        "The version could not be read" \
+        "The omarchy command returned an error." \
+        "The Omarchy version check failed." \
+        "Run 'omarchy version' in a terminal and review its error." \
+        "" "" "" failed
+    fi
+  fi
+}
+
+check_shell() {
+  local output="" rc
+  if ! command -v omarchy-shell >/dev/null 2>&1; then
+    doctor_check_json shell Desktop "Quattro shell" error \
+      "omarchy-shell is missing" \
+      "The Quattro shell executable is not available on PATH." \
+      "The Quattro shell executable is unavailable." \
+      "Restore the Omarchy shell package; Doctor will not reinstall it automatically." \
+      "" "" "" unavailable
+    return
+  fi
+  if timed_capture output omarchy-shell shell ping; then
+    doctor_check_json shell Desktop "Quattro shell" ok \
+      "The shell is responding" \
+      "Quattro answered its local shell ping." \
+      "The Quattro shell is responding." \
+      "No action is needed."
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      doctor_check_json shell Desktop "Quattro shell" unknown \
+        "The shell ping timed out" \
+        "Quattro did not answer within ${CHECK_TIMEOUT}s." \
+        "The Quattro shell check timed out." \
+        "From a terminal, review the shell and run 'omarchy restart shell' only if you choose to restart it." \
+        "" "" "" timeout
+    else
+      doctor_check_json shell Desktop "Quattro shell" warning \
+        "The shell is not responding" \
+        "The shell ping failed. The terminal Doctor remains available independently." \
+        "The Quattro shell did not respond." \
+        "From a terminal, run 'omarchy restart shell' if you choose to restart it." \
+        "" "" "" failed
+    fi
+  fi
+}
+
+check_hyprland() {
+  local errors="" rc count
+  if ! command -v hyprctl >/dev/null 2>&1; then
+    doctor_check_json hyprland Desktop "Hyprland configuration" unknown \
+      "hyprctl is unavailable" \
+      "OmaPanel could not inspect the active Hyprland configuration." \
+      "The Hyprland configuration could not be checked." \
+      "Restore hyprctl or run the check inside an active Hyprland session." \
+      "" "" "" unavailable
+    return
+  fi
+  if timed_capture errors hyprctl configerrors; then
+    if [[ -z $errors ]]; then
+      doctor_check_json hyprland Desktop "Hyprland configuration" ok \
+        "No configuration errors" \
+        "The active Hyprland configuration parsed successfully." \
+        "No active Hyprland configuration errors were reported." \
+        "No action is needed."
+    else
+      count="$(wc -l <<<"$errors" | tr -d ' ')"
+      doctor_check_json hyprland Desktop "Hyprland configuration" error \
+        "$count configuration error(s) detected" "$errors" \
+        "$count active Hyprland configuration error(s) were detected." \
+        "Review the local error details before editing the configuration." \
+        open-hypr-config _ "Open configuration"
+    fi
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      doctor_check_json hyprland Desktop "Hyprland configuration" unknown \
+        "The configuration check timed out" \
+        "hyprctl did not answer within ${CHECK_TIMEOUT}s." \
+        "The Hyprland configuration check timed out." \
+        "Run 'hyprctl configerrors' inside the active session." \
+        "" "" "" timeout
+    else
+      doctor_check_json hyprland Desktop "Hyprland configuration" unknown \
+        "The active configuration could not be read" \
+        "hyprctl returned an error, commonly because no Hyprland session is active." \
+        "The Hyprland configuration could not be checked." \
+        "Run the check inside the active Hyprland session." \
+        "" "" "" failed
+    fi
+  fi
+}
+
+check_services() {
+  local scope="$1" id title output="" rc count args=()
+  if [[ $scope == user ]]; then
+    id="user-services"
+    title="User services"
+    args=(--user --failed --no-legend --plain)
+  else
+    id="system-services"
+    title="System services"
+    args=(--failed --no-legend --plain)
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    doctor_check_json "$id" Services "$title" unknown \
+      "systemctl is unavailable" \
+      "OmaPanel could not query failed units." \
+      "$title could not be checked." \
+      "Restore systemctl before diagnosing services." \
+      "" "" "" unavailable
+    return
+  fi
+  if timed_capture output systemctl "${args[@]}"; then
+    if [[ -z $output ]]; then
+      doctor_check_json "$id" Services "$title" ok \
+        "No failed units" "systemd reports no failed $scope units." \
+        "No failed $scope services were reported." "No action is needed."
+    else
+      count="$(wc -l <<<"$output" | tr -d ' ')"
+      doctor_check_json "$id" Services "$title" warning \
+        "$count failed unit(s) detected" "$output" \
+        "$count failed $scope service unit(s) were detected." \
+        "Review the journal before deciding whether a service needs treatment." \
+        "journal-$scope" _ "View journal"
+    fi
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      doctor_check_json "$id" Services "$title" unknown \
+        "The service check timed out" \
+        "systemctl did not answer within ${CHECK_TIMEOUT}s." \
+        "$title timed out during diagnosis." \
+        "Run the equivalent systemctl command locally." \
+        "" "" "" timeout
+    else
+      doctor_check_json "$id" Services "$title" unknown \
+        "The service state could not be read" \
+        "systemctl returned an error." \
+        "$title could not be checked." \
+        "Run the equivalent systemctl command locally." \
+        "" "" "" failed
+    fi
+  fi
+}
+
+check_disk() {
+  local id="$1" title="$2" path="$3" line="" rc percent available status summary recommendation
+  if timed_capture line df -P -B1 "$path"; then
+    line="$(awk 'NR==2 {print $3, $4, $5}' <<<"$line")"
+    if [[ -z $line ]]; then
+      doctor_check_json "$id" Storage "$title" unknown \
+        "Usage could not be parsed" "df returned no filesystem row." \
+        "$title usage could not be parsed." \
+        "Inspect the filesystem with 'df -h'." "" "" "" failed
+      return
+    fi
+    read -r _ available percent <<<"$line"
+    percent="${percent%%%}"
+    summary="$percent% used · $(numfmt --to=iec-i --suffix=B "$available" 2>/dev/null || printf '%s bytes' "$available") free"
+    if (( percent >= 90 )); then
+      status=error
+      recommendation="Inspect large files before removing anything; OmaPanel does not perform cleanup."
+    elif (( percent >= 80 )); then
+      status=warning
+      recommendation="Review storage usage before the filesystem becomes critically full."
+    else
+      status=ok
+      recommendation="No action is needed."
+    fi
+    doctor_check_json "$id" Storage "$title" "$status" "$summary" \
+      "$summary" "$title is $percent% used." "$recommendation"
+  else
+    rc=$?
+    if (( rc == 124 )); then
+      doctor_check_json "$id" Storage "$title" unknown \
+        "The filesystem check timed out" \
+        "df did not answer within ${CHECK_TIMEOUT}s." \
+        "$title usage timed out during diagnosis." \
+        "Inspect the filesystem with 'df -h'." "" "" "" timeout
+    else
+      doctor_check_json "$id" Storage "$title" unknown \
+        "Usage could not be read" "df returned an error." \
+        "$title usage could not be read." \
+        "Inspect the filesystem with 'df -h'." "" "" "" failed
+    fi
+  fi
+}
+
+check_restart_state() {
+  local restart_markers
   restart_markers="$(
-    { find "$HOME/.local/state/omarchy" -maxdepth 1 -type f \( -name 'reboot-required' -o -name 'restart-*-required' \) -printf '%f\n' 2>/dev/null || true; } |
-      sort | paste -sd ', ' -
+    find "$HOME/.local/state/omarchy" -maxdepth 1 -type f \
+      \( -name 'reboot-required' -o -name 'restart-*-required' \) \
+      -printf '%f\n' 2>/dev/null | sort | paste -sd ', ' - || true
   )"
   if [[ -n $restart_markers ]]; then
-    rows+=("$(health_json restart-state "Restart state" warning "A restart is required" "$restart_markers" update _ "Open update workflow")")
+    doctor_check_json restart-state Omarchy "Restart state" warning \
+      "A restart is pending" "$restart_markers" \
+      "Omarchy recorded a pending reboot or service restart." \
+      "Open Omarchy's restart review and choose when to apply it." \
+      update-restart _ "Open restart review"
   else
-    rows+=("$(health_json restart-state "Restart state" ok "No restart markers" "Omarchy has not recorded a pending reboot or service restart.")")
+    doctor_check_json restart-state Omarchy "Restart state" ok \
+      "No restart markers" \
+      "Omarchy has not recorded a pending reboot or service restart." \
+      "No pending Omarchy restart marker was found." "No action is needed."
   fi
+}
 
-  if [[ -e /var/lib/pacman/db.lck ]]; then
-    rows+=("$(health_json pacman-lock "Package database" warning "Pacman database is locked" "A package operation may be active. Do not delete the lock while Pacman is running.")")
+check_pacman_lock() {
+  if [[ -e ${OMAPANEL_PACMAN_LOCK:-/var/lib/pacman/db.lck} ]]; then
+    doctor_check_json pacman-lock Omarchy "Package database" warning \
+      "The package database is locked" \
+      "A package operation may be active. A lock alone does not prove that Pacman is stuck." \
+      "A Pacman database lock is present." \
+      "Wait for active package operations and investigate their state; never delete the lock merely because Doctor found it."
   else
-    rows+=("$(health_json pacman-lock "Package database" ok "Package database is available" "No Pacman database lock is present.")")
+    doctor_check_json pacman-lock Omarchy "Package database" ok \
+      "The package database is available" \
+      "No Pacman database lock is present." \
+      "No Pacman database lock is present." "No action is needed."
   fi
+}
 
-  orphan_count="$( { pacman -Qqdt 2>/dev/null || true; } | wc -l)"
-  if (( orphan_count > 0 )); then
-    rows+=("$(health_json orphans "Orphaned packages" info "$orphan_count package(s) can be reviewed" "Omarchy will open its interactive orphan review; nothing is removed automatically." review-orphans _ "Review packages")")
+check_snapshots() {
+  local raw="" rc count detail
+  if ! command -v snapper >/dev/null 2>&1; then
+    doctor_check_json snapshots Recovery "Recovery snapshots" info \
+      "Snapper is not installed" \
+      "Snapshot recovery is unavailable on this system." \
+      "Snapper is not installed." \
+      "Doctor will not install or configure snapshot recovery automatically."
+    return
+  fi
+  if timed_capture raw snapper --csvout list-configs; then
+    detail="$(awk -F, 'NR>1 && $1 != "" {print $1}' <<<"$raw" | paste -sd ', ' -)"
+    count="$(awk -F, 'NR>1 && $1 != "" {count++} END {print count+0}' <<<"$raw")"
+    if (( count > 0 )); then
+      doctor_check_json snapshots Recovery "Recovery snapshots" ok \
+        "$count Snapper configuration(s) available" \
+        "Configured snapshot scopes: $detail. Snapshot contents were not read." \
+        "$count Snapper configuration(s) are available." \
+        "Review snapshots through Omarchy only when recovery is necessary."
+    else
+      doctor_check_json snapshots Recovery "Recovery snapshots" warning \
+        "Snapper has no configuration" \
+        "The command is installed but no snapshot scope was reported." \
+        "Snapper is installed without a configured snapshot scope." \
+        "Review Omarchy's snapshot setup before relying on snapshot recovery."
+    fi
   else
-    rows+=("$(health_json orphans "Orphaned packages" ok "No orphaned packages" "Pacman reports no unrequired dependency packages.")")
+    rc=$?
+    if (( rc == 124 )); then
+      doctor_check_json snapshots Recovery "Recovery snapshots" unknown \
+        "The snapshot check timed out" \
+        "snapper did not answer within ${CHECK_TIMEOUT}s." \
+        "The Snapper configuration check timed out." \
+        "Inspect Snapper locally before relying on recovery." \
+        "" "" "" timeout
+    else
+      doctor_check_json snapshots Recovery "Recovery snapshots" unknown \
+        "Snapshot configuration could not be read" \
+        "snapper returned an error without OmaPanel requesting privilege." \
+        "The Snapper configuration could not be checked." \
+        "Inspect Snapper locally; Doctor will not request privilege." \
+        "" "" "" failed
+    fi
   fi
+}
 
-  for required in omarchy omarchy-shell hyprctl pacman jq wl-copy xdg-terminal-exec; do
+check_omapanel() {
+  local missing="" required cli_path="" summary recommendation status detail report_summary
+  for required in jq timeout pacman xdg-terminal-exec; do
     command -v "$required" >/dev/null 2>&1 || missing+="${missing:+, }$required"
   done
-  if [[ -z $missing ]]; then
-    rows+=("$(health_json commands "Recovery tools" ok "Required commands are available" "OmaPanel can launch all core POC handoffs." copy-report _ "Copy report")")
-  else
-    rows+=("$(health_json commands "Recovery tools" error "Required commands are missing" "$missing")")
+  if [[ -n $missing ]]; then
+    doctor_check_json omapanel OmaPanel "OmaPanel installation" error \
+      "Required commands are missing" "$missing" \
+      "OmaPanel is missing required local commands: $missing." \
+      "Restore the missing dependencies before using all OmaPanel features." \
+      "" "" "" unavailable
+    return
   fi
+
+  if [[ ! -x $ROOT/scripts/omapanel-backend || ! -x $ROOT/bin/omapanel ]] ||
+    ! jq -e '.id == "spaskich.omapanel" and (.version | type == "string")' "$ROOT/manifest.json" >/dev/null 2>&1; then
+    doctor_check_json omapanel OmaPanel "OmaPanel installation" error \
+      "Plugin files are incomplete" \
+      "The manifest, backend, or CLI entry point is missing or invalid." \
+      "The OmaPanel installation is incomplete." \
+      "Reinstall the plugin from its trusted repository; Doctor will not replace files automatically." \
+      "" "" "" failed
+    return
+  fi
+
+  cli_path="$(command -v omapanel 2>/dev/null || true)"
+  if [[ -z $cli_path ]]; then
+    status=info
+    summary="The plugin is healthy; the CLI is not linked"
+    detail="Run the plugin's setup script to add ~/.local/bin/omapanel."
+    report_summary="The OmaPanel plugin is valid, but its optional CLI link is not on PATH."
+    recommendation="Run setup again if you want to call 'omapanel doctor' without its full path."
+  else
+    status=ok
+    summary="Plugin and CLI files are valid"
+    detail="OmaPanel $OMAPANEL_VERSION passed its local integrity checks."
+    report_summary="OmaPanel $OMAPANEL_VERSION passed its local integrity checks."
+    recommendation="No action is needed."
+  fi
+  doctor_check_json omapanel OmaPanel "OmaPanel installation" "$status" \
+    "$summary" "$detail" "$report_summary" "$recommendation"
+}
+
+collect_doctor() {
+  local -a rows=()
+  rows+=("$(check_omarchy)")
+  rows+=("$(check_restart_state)")
+  rows+=("$(check_pacman_lock)")
+  rows+=("$(check_shell)")
+  rows+=("$(check_hyprland)")
+  rows+=("$(check_services user)")
+  rows+=("$(check_services system)")
+  rows+=("$(check_disk root-disk "Root filesystem" /)")
+  rows+=("$(check_disk home-disk "Home filesystem" "$HOME")")
+  rows+=("$(check_snapshots)")
+  rows+=("$(check_omapanel)")
 
   json_lines_to_array "${rows[@]}" |
     jq -c \
-      --argjson schemaVersion "$SCHEMA_VERSION" \
-      --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,health:.,errors:[]}'
+      --argjson schemaVersion "$DOCTOR_SCHEMA_VERSION" \
+      --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      def rank: if . == "error" then 4 elif . == "warning" then 3
+        elif . == "unknown" then 2 elif . == "info" then 1 else 0 end;
+      . as $checks
+      | ($checks | group_by(.status) | map({key:.[0].status,value:length}) | from_entries) as $rawCounts
+      | ($rawCounts + {
+          ok:($rawCounts.ok // 0), info:($rawCounts.info // 0),
+          warning:($rawCounts.warning // 0), error:($rawCounts.error // 0),
+          unknown:($rawCounts.unknown // 0), total:($checks | length)
+        }) as $counts
+      | ($checks | map(.status) | max_by(rank)) as $status
+      | {
+          schemaVersion:$schemaVersion,generatedAt:$generatedAt,checks:$checks,
+          overall:{status:$status,counts:$counts},
+          errors:($checks
+            | map(select(.failureReason != "")
+              | {checkId:.id,reason:.failureReason}))
+        }'
+}
+
+doctor_report_json() {
+  local diagnostics="$1"
+  jq -c \
+    --argjson schemaVersion "$DOCTOR_REPORT_SCHEMA_VERSION" \
+    --arg omapanelVersion "$OMAPANEL_VERSION" '
+      {
+        schemaVersion:$schemaVersion,
+        kind:"omapanel.doctor",
+        generatedAt:.generatedAt,
+        omapanelVersion:$omapanelVersion,
+        overall:.overall,
+        checks:(.checks | map({
+          id,category,title,status,
+          summary:.reportSummary,
+          recommendation
+        })),
+        errors:.errors
+      }
+    ' <<<"$diagnostics"
+}
+
+render_doctor_human() {
+  local report="$1"
+  jq -r '
+    "OmaPanel Doctor " + .omapanelVersion,
+    "Generated: " + .generatedAt,
+    "Overall: " + (.overall.status | ascii_upcase)
+      + " · " + (.overall.counts.error | tostring) + " error"
+      + " · " + (.overall.counts.warning | tostring) + " warning"
+      + " · " + (.overall.counts.unknown | tostring) + " unknown",
+    "",
+    (.checks[]
+      | "[" + (.status | ascii_upcase) + "] " + .category + " / " + .title + "\n"
+        + "  " + .summary
+        + (if .recommendation == "" then "" else "\n  Next: " + .recommendation end))
+  ' <<<"$report"
+}
+
+render_doctor_human_color() {
+  local report="$1" line color reset=$'\033[0m'
+  while IFS= read -r line; do
+    color=""
+    case "$line" in
+      '[OK]'*) color=$'\033[32m' ;;
+      '[INFO]'*) color=$'\033[36m' ;;
+      '[WARNING]'*) color=$'\033[33m' ;;
+      '[ERROR]'*) color=$'\033[31m' ;;
+      '[UNKNOWN]'*) color=$'\033[35m' ;;
+    esac
+    if [[ -n $color ]]; then
+      printf '%s%s%s\n' "$color" "$line" "$reset"
+    else
+      printf '%s\n' "$line"
+    fi
+  done < <(render_doctor_human "$report")
+}
+
+doctor_exit_code() {
+  local report="$1" status
+  status="$(jq -r '.overall.status' <<<"$report")"
+  case "$status" in
+    error) return 2 ;;
+    warning|unknown) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+write_report_file() {
+  local path="$1" content="$2" parent base temporary
+  parent="$(dirname -- "$path")"
+  base="$(basename -- "$path")"
+  [[ -d $parent ]] || {
+    echo "Report directory does not exist: $parent" >&2
+    return 1
+  }
+  [[ ! -e $path && ! -L $path ]] || {
+    echo "Refusing to overwrite existing report: $path" >&2
+    return 1
+  }
+
+  umask 077
+  temporary="$(mktemp --tmpdir="$parent" ".${base}.omapanel.XXXXXX")" || return 1
+  if ! printf '%s\n' "$content" >"$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  chmod 0600 "$temporary"
+  if ! ln -- "$temporary" "$path" 2>/dev/null; then
+    rm -f -- "$temporary"
+    echo "Could not publish report without overwriting a file: $path" >&2
+    return 1
+  fi
+  rm -f -- "$temporary"
+}
+
+run_doctor_cli() {
+  local json=false copy=false output_path="" diagnostics report content result=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --json) json=true ;;
+      --copy) copy=true ;;
+      --output)
+        shift
+        [[ $# -gt 0 ]] || { echo "--output requires a path" >&2; return 3; }
+        output_path="$1"
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: omapanel doctor [--json] [--copy | --output <path>]
+
+Run privilege-free diagnostics. Human-readable output is the default.
+--json emits a stable, privacy-reviewed document. --copy copies the human
+report. --output writes the selected format to a new mode-0600 file.
+Nothing is uploaded or sent automatically.
+EOF
+        return 0
+        ;;
+      *) echo "Unknown doctor option: $1" >&2; return 3 ;;
+    esac
+    shift
+  done
+
+  if $copy && [[ -n $output_path ]]; then
+    echo "--copy and --output cannot be combined" >&2
+    return 3
+  fi
+  if $copy && $json; then
+    echo "--copy always uses the human report and cannot be combined with --json" >&2
+    return 3
+  fi
+
+  diagnostics="$(collect_doctor)" || {
+    echo "OmaPanel Doctor could not collect diagnostics." >&2
+    return 3
+  }
+  report="$(doctor_report_json "$diagnostics")" || {
+    echo "OmaPanel Doctor could not build its privacy-reviewed report." >&2
+    return 3
+  }
+  doctor_exit_code "$report" || result=$?
+
+  if $json; then
+    content="$(jq '.' <<<"$report")"
+  else
+    content="$(render_doctor_human "$report")"
+  fi
+
+  if $copy; then
+    command -v wl-copy >/dev/null 2>&1 || {
+      echo "wl-copy is unavailable; use stdout or --output instead." >&2
+      return 3
+    }
+    if ! printf '%s\n' "$content" | wl-copy; then
+      echo "The Wayland clipboard is unavailable; use stdout or --output instead." >&2
+      return 3
+    fi
+    echo "Copied a privacy-reviewed Doctor report to the clipboard." >&2
+  elif [[ -n $output_path ]]; then
+    write_report_file "$output_path" "$content" || return 3
+    echo "Saved Doctor report to $output_path" >&2
+  elif ! $json && [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+    render_doctor_human_color "$report"
+  else
+    printf '%s\n' "$content"
+  fi
+
+  return "$result"
 }
 
 validate_target() {
@@ -440,7 +1035,7 @@ validate_target() {
       desktop_file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$target.desktop"
       [[ -f $desktop_file ]]
       ;;
-    update|restart-shell|journal-user|journal-system|open-hypr-config|snapshot-create|snapshot-restore|review-orphans|copy-report)
+    update|update-restart|restart-shell|journal-user|journal-system|open-hypr-config|snapshot-create|snapshot-restore|review-orphans|copy-report)
       [[ $target == _ ]]
       ;;
     *)
@@ -463,7 +1058,7 @@ action_spec() {
       ACTION_LABEL="Open package remover"
       ACTION_WORKFLOW="Omarchy's package remover will open with $target prefilled. Review Pacman's dependency list before accepting."
       ACTION_TERMINAL=true
-      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal env "FZF_DEFAULT_QUERY=$target" omarchy-pkg-remove)
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal env "FZF_DEFAULT_QUERY=$target" omarchy pkg remove)
       ;;
     webapp)
       ACTION_LABEL="Remove web app"
@@ -498,6 +1093,13 @@ action_spec() {
       ACTION_TERMINAL=true
       ACTION_DESTRUCTIVE=false
       ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy update)
+      ;;
+    update-restart)
+      ACTION_LABEL="Open restart review"
+      ACTION_WORKFLOW="A terminal will open Omarchy's restart review. Omarchy will ask before applying a reboot or service restart."
+      ACTION_TERMINAL=true
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy update restart)
       ;;
     restart-shell)
       ACTION_LABEL="Restart shell"
@@ -555,25 +1157,34 @@ action_spec() {
 }
 
 action_preview() {
-  local adapter="$1" target="$2" argv_json
+  local adapter="$1" target="$2" argv_json impact_json='[]'
   action_spec "$adapter" "$target"
   argv_json="$(printf '%s\n' "${ACTION_ARGV[@]}" | jq -R . | jq -s '.')"
+  if [[ $adapter == package ]]; then
+    impact_json="$(collect_package_launcher_impact "$(package_desktop_owners)" | jq -c --arg package "$target" '
+      [.[] | select(.package == $package) | {id,name,visible}]')"
+  fi
   jq -cn \
     --arg adapter "$adapter" --arg target "$target" \
     --arg label "$ACTION_LABEL" --arg workflow "$ACTION_WORKFLOW" \
     --argjson terminal "$ACTION_TERMINAL" --argjson destructive "$ACTION_DESTRUCTIVE" \
-    --argjson argv "$argv_json" \
+    --argjson argv "$argv_json" --argjson impactedLaunchers "$impact_json" \
     '{ok:true,adapter:$adapter,target:$target,label:$label,workflow:$workflow,
-      terminal:$terminal,destructive:$destructive,argv:$argv}'
+      terminal:$terminal,destructive:$destructive,argv:$argv,
+      impactedLaunchers:$impactedLaunchers}'
 }
 
 copy_report() {
-  local report
-  report="$(collect_health | jq -r '
-    "OmaPanel diagnostic report\nGenerated: " + .generatedAt + "\n" +
-    (.health | map("[" + (.status | ascii_upcase) + "] " + .title + ": " + .summary) | join("\n"))')"
-  printf '%s\n' "$report" | wl-copy
-  jq -cn '{ok:true,message:"Diagnostic report copied to the clipboard."}'
+  local diagnostics report human
+  command -v wl-copy >/dev/null 2>&1 || {
+    echo "wl-copy is unavailable" >&2
+    return 1
+  }
+  diagnostics="$(collect_doctor)"
+  report="$(doctor_report_json "$diagnostics")"
+  human="$(render_doctor_human "$report")"
+  printf '%s\n' "$human" | wl-copy
+  jq -cn '{ok:true,message:"Privacy-reviewed Doctor report copied to the clipboard."}'
 }
 
 run_action() {
@@ -606,7 +1217,10 @@ main() {
             exit 2
           fi
           ;;
-        health) collect_health ;;
+        doctor|health)
+          [[ -z ${3:-} ]] || { usage; exit 2; }
+          collect_doctor
+          ;;
         *) usage; exit 2 ;;
       esac
       ;;
@@ -619,6 +1233,10 @@ main() {
       fi
       [[ $# == 2 ]] || { usage; exit 2; }
       run_action "$dry_run" "$1" "$2"
+      ;;
+    doctor)
+      shift
+      run_doctor_cli "$@"
       ;;
     -h|--help|"") usage ;;
     *) usage; exit 2 ;;

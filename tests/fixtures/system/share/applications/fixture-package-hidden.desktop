@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Fixture Package Hidden Helper
+Comment=A hidden launcher that still belongs in removal impact
+NoDisplay=true
+Exec=fixture-package-hidden

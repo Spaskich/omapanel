@@ -26,7 +26,7 @@ function filterPrograms(programs, query, filter, showAdvanced) {
 }
 
 function programCounts(programs) {
-  var result = { total: 0, app: 0, webapp: 0, tui: 0, plugin: 0, flatpak: 0, launcher: 0, package: 0 }
+  var result = { total: 0, app: 0, webapp: 0, tui: 0, plugin: 0, flatpak: 0, launcher: 0, package: 0, mise: 0 }
   var source = Array.isArray(programs) ? programs : []
   for (var i = 0; i < source.length; i++) {
     var row = source[i] || {}
@@ -36,6 +36,19 @@ function programCounts(programs) {
     if (result[key] !== undefined) result[key]++
   }
   return result
+}
+
+function filterDoctor(checks, filter) {
+  var source = Array.isArray(checks) ? checks : []
+  var selected = normalized(filter || "all")
+  if (selected === "all") return source.slice()
+  if (selected === "attention") {
+    return source.filter(function(row) {
+      var status = normalized(row.status)
+      return status === "error" || status === "warning" || status === "unknown"
+    })
+  }
+  return source.filter(function(row) { return normalized(row.category) === selected })
 }
 
 function severityRank(status) {
@@ -85,6 +98,7 @@ function kindLabel(kind) {
     case "flatpak": return "Flatpak"
     case "launcher": return "Launcher"
     case "package": return "Package"
+    case "mise": return "Mise Tool"
     default: return "Software"
   }
 }
@@ -99,8 +113,29 @@ function kindIcon(kind, fallback) {
     case "flatpak": return ""
     case "launcher": return "󰍉"
     case "package": return "󰣇"
+    case "mise": return "󰏗"
     default: return "󰏖"
   }
+}
+
+function launcherImpactText(row) {
+  if (!row || Number(row.impactLauncherCount || 0) <= 0) return ""
+  var names = row.impactLauncherNames
+  var list = []
+  if (Array.isArray(names)) list = names
+  else if (names && typeof names.length === "number") {
+    for (var i = 0; i < names.length; i++) list.push(String(names[i]))
+  }
+  return Number(row.impactLauncherCount) + " launcher entr"
+    + (Number(row.impactLauncherCount) === 1 ? "y" : "ies")
+    + " discovered:\n" + list.join("\n")
+}
+
+function previewLauncherImpact(launchers) {
+  if (!Array.isArray(launchers) || launchers.length === 0) return ""
+  var names = []
+  for (var i = 0; i < launchers.length; i++) names.push(String(launchers[i].name || launchers[i].id || "Unknown launcher"))
+  return "\n\nLauncher entries affected (" + names.length + "):\n" + names.join("\n")
 }
 
 function statusIcon(status) {

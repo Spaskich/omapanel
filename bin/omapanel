@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ENTRY_POINT="$(readlink -f -- "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$ENTRY_POINT")/.." && pwd)"
+BACKEND="$ROOT/scripts/omapanel-backend"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  omapanel doctor [--json] [--copy | --output <path>]
+  omapanel --version
+
+OmaPanel's terminal entry point. Doctor performs privilege-free diagnostics
+and never uploads a report or repairs the system.
+EOF
+}
+
+case "${1:-}" in
+  doctor)
+    shift
+    exec "$BACKEND" doctor "$@"
+    ;;
+  --version|-V)
+    jq -r '.version' "$ROOT/manifest.json"
+    ;;
+  --help|-h|"")
+    usage
+    ;;
+  *)
+    echo "Unknown OmaPanel command: $1" >&2
+    usage >&2
+    exit 3
+    ;;
+esac

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Fixture Package Helper
+Comment=A second launcher owned by the same package
+Icon=fixture-package
+Exec=fixture-package-helper

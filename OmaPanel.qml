@@ -15,7 +15,7 @@ Item {
   property var manifest: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "spaskich.omapanel"
-  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.1.0"
+  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.2.0"
   readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string backendPath: sourceDir + "/scripts/omapanel-backend"
   readonly property var appLibrary: shell ? shell.appLibrary : null
@@ -30,6 +30,7 @@ Item {
   property var appMetadata: ({})
   property string programQuery: ""
   property string programFilter: "all"
+  property string doctorFilter: "all"
   property bool showAdvanced: false
   property int selectedProgramIndex: 0
   property int selectedHealthIndex: 0
@@ -42,6 +43,7 @@ Item {
   property string healthError: ""
   property string programOutput: ""
   property string healthOutput: ""
+  property string doctorGeneratedAt: ""
 
   property bool confirmOpen: false
   property var pendingPreview: ({})
@@ -198,12 +200,13 @@ Item {
   function applyHealth(raw) {
     try {
       var parsed = JSON.parse(String(raw || ""))
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.health)) throw new Error("Unsupported health response")
-      healthRaw = parsed.health
+      if (parsed.schemaVersion !== 2 || !Array.isArray(parsed.checks)) throw new Error("Unsupported Doctor response")
+      healthRaw = parsed.checks
+      doctorGeneratedAt = String(parsed.generatedAt || "")
       healthError = ""
       rebuildHealth()
     } catch (e) {
-      healthError = "Health checks could not be read: " + e
+      healthError = "Doctor results could not be read: " + e
     }
   }
 
@@ -219,8 +222,9 @@ Item {
   }
 
   function rebuildHealth() {
+    var rows = Model.filterDoctor(healthRaw, doctorFilter)
     healthModel.clear()
-    for (var i = 0; i < healthRaw.length; i++) healthModel.append(healthRaw[i])
+    for (var i = 0; i < rows.length; i++) healthModel.append(rows[i])
     selectedHealthIndex = Model.clampIndex(selectedHealthIndex, healthModel.count)
     healthRevision++
     Qt.callLater(function() {
@@ -410,7 +414,7 @@ Item {
 
   Process {
     id: healthProc
-    command: [root.backendPath, "collect", "health"]
+    command: [root.backendPath, "collect", "doctor"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -422,7 +426,7 @@ Item {
     onExited: function(exitCode) {
       root.healthLoading = false
       if (exitCode !== 0 && root.healthOutput === "")
-        root.healthError = String(healthStderr.text || "The health collector failed.").trim()
+        root.healthError = String(healthStderr.text || "Doctor could not complete its checks.").trim()
     }
   }
 
@@ -590,7 +594,7 @@ Item {
 
             Text {
               visible: root.programsLoading || root.healthLoading
-              text: root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Checking health"
+              text: root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Running Doctor"
               color: root.mutedText
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -651,7 +655,7 @@ Item {
                 model: [
                   { label: "Overview", icon: "󰋜", hint: "Alt+1" },
                   { label: "Programs", icon: "󰀻", hint: "Alt+2" },
-                  { label: "Health & Recovery", icon: "󰒘", hint: "Alt+3" }
+                  { label: "Doctor", icon: "󰒘", hint: "Alt+3" }
                 ]
                 delegate: Button {
                   required property int index
@@ -703,7 +707,7 @@ Item {
                 Layout.fillWidth: true
                 spacing: Style.spacing.sm
                 Repeater {
-                  model: ["Overview", "Programs", "Health"]
+                  model: ["Overview", "Programs", "Doctor"]
                   delegate: Button {
                     required property int index
                     required property string modelData
@@ -813,11 +817,11 @@ Item {
                           anchors.fill: parent
                           anchors.margins: parent.contentLeftInset
                           spacing: Style.spacing.sm
-                          Text { text: Model.statusIcon(root.overall.status) + "  SYSTEM HEALTH"; color: root.statusColor(root.overall.status); font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                          Text { text: Model.statusIcon(root.overall.status) + "  OMAPANEL DOCTOR"; color: root.statusColor(root.overall.status); font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
                           Text { text: root.healthLoading && root.healthRaw.length === 0 ? "Checking…" : root.overall.label; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
-                          Text { width: parent.width; text: root.overall.count > 0 ? root.overall.count + " of " + root.healthRaw.length + " checks need attention" : root.healthRaw.length + " read-only checks completed"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                          Text { width: parent.width; text: root.overall.count > 0 ? root.overall.count + " of " + root.healthRaw.length + " checks need attention" : root.healthRaw.length + " diagnostic checks completed"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
                           Item { width: 1; height: Style.spacing.xs }
-                          Button { text: "Open health"; iconText: "󰁔"; onClicked: root.setPage(2) }
+                          Button { text: "View Doctor"; iconText: "󰁔"; onClicked: root.setPage(2) }
                         }
                       }
                     }
@@ -910,13 +914,14 @@ Item {
                           { label: "All", value: "all" }, { label: "Apps", value: "app" },
                           { label: "Web", value: "webapp" }, { label: "TUIs", value: "tui" },
                           { label: "Plugins", value: "plugin" }, { label: "Flatpak", value: "flatpak" },
-                          { label: "Launchers", value: "launcher" }, { label: "Packages", value: "package" }
+                          { label: "Launchers", value: "launcher" }, { label: "Packages", value: "package" },
+                          { label: "Mise", value: "mise" }
                         ]
                         delegate: Button {
                           required property var modelData
                           text: modelData.label
                           selected: root.programFilter === modelData.value
-                          visible: modelData.value !== "package" || root.showAdvanced
+                          visible: (modelData.value !== "package" && modelData.value !== "mise") || root.showAdvanced
                           onClicked: {
                             root.programFilter = modelData.value
                             root.selectedProgramIndex = 0
@@ -937,12 +942,12 @@ Item {
                       font.pixelSize: Style.font.caption
                     }
                     Button {
-                      text: root.showAdvanced ? "Hide packages" : "Advanced packages"
+                      text: root.showAdvanced ? "Hide advanced" : "Advanced tools"
                       iconText: "󰒓"
                       selected: root.showAdvanced
                       onClicked: {
                         root.showAdvanced = !root.showAdvanced
-                        if (!root.showAdvanced && root.programFilter === "package") root.programFilter = "all"
+                        if (!root.showAdvanced && (root.programFilter === "package" || root.programFilter === "mise")) root.programFilter = "all"
                         root.rebuildPrograms()
                       }
                     }
@@ -1038,7 +1043,16 @@ Item {
                         PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
                         PanelSectionHeader { Layout.fillWidth: true; text: "DETAILS"; foreground: root.foreground; fontFamily: Style.font.family }
                         Text { Layout.fillWidth: true; text: root.selectedProgramRow && root.selectedProgramRow.description ? root.selectedProgramRow.description : "No description is available."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
-                        Text { Layout.fillWidth: true; text: root.selectedProgramRow ? "Managed by: " + root.selectedProgramRow.source + "\nID: " + root.selectedProgramRow.sourceId + (root.selectedProgramRow.version ? "\nVersion: " + root.selectedProgramRow.version : "") : ""; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                        Text { Layout.fillWidth: true; text: root.selectedProgramRow ? "Managed by: " + root.selectedProgramRow.source + "\nID: " + root.selectedProgramRow.sourceId + (root.selectedProgramRow.version ? "\nVersion: " + root.selectedProgramRow.version : "") + (root.selectedProgramRow.kind === "mise" ? "\nState: " + (root.selectedProgramRow.active ? "Active" : "Installed, inactive") : "") : ""; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                        Text {
+                          visible: root.selectedProgramRow && root.selectedProgramRow.impactLauncherCount > 0
+                          Layout.fillWidth: true
+                          text: Model.launcherImpactText(root.selectedProgramRow)
+                          color: root.foreground
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.bodySmall
+                          wrapMode: Text.WordWrap
+                        }
                         Item { Layout.fillHeight: true }
                         Text { visible: root.selectedProgramRow && root.selectedProgramRow.warning; Layout.fillWidth: true; text: "󰀦  " + (root.selectedProgramRow ? root.selectedProgramRow.warning : ""); color: root.selectedProgramRow && root.selectedProgramRow.protected ? root.mutedText : Color.urgent; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
                         Button {
@@ -1055,7 +1069,7 @@ Item {
                   }
                 }
 
-                // ------------------------------------------ Health & Recovery
+                // --------------------------------------------------- Doctor
                 ColumnLayout {
                   spacing: Style.spacing.sm
 
@@ -1064,8 +1078,8 @@ Item {
                     ColumnLayout {
                       Layout.fillWidth: true
                       spacing: 0
-                      Text { text: "Health & Recovery"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
-                      Text { text: "Read-only checks first; repairs stay in Omarchy's existing workflows."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                      Text { text: "Doctor"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                      Text { text: "Diagnose and explain; treatment stays in established Omarchy workflows."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
                     }
                     BorderSurface {
                       visible: root.healthRaw.length > 0
@@ -1084,8 +1098,54 @@ Item {
                         font.bold: true
                       }
                     }
-                    Button { text: "Copy report"; iconText: "󰆏"; onClicked: root.requestAction("copy-report", "_") }
-                    Button { iconText: "󰑐"; iconSpinning: root.healthLoading; tooltipText: "Refresh (Ctrl+R)"; onClicked: root.refreshHealth() }
+                    Button { text: "Copy shareable report"; iconText: "󰆏"; onClicked: root.requestAction("copy-report", "_") }
+                    Button { text: root.healthLoading ? "Running…" : "Run Doctor"; iconText: "󰑐"; iconSpinning: root.healthLoading; tooltipText: "Run again (Ctrl+R)"; onClicked: root.refreshHealth() }
+                  }
+
+                  QQC.ScrollView {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Style.space(42)
+                    QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AlwaysOff
+                    Row {
+                      spacing: Style.spacing.xs
+                      Repeater {
+                        model: [
+                          { label: "All", value: "all" }, { label: "Needs attention", value: "attention" },
+                          { label: "Omarchy", value: "omarchy" }, { label: "Desktop", value: "desktop" },
+                          { label: "Services", value: "services" }, { label: "Storage", value: "storage" },
+                          { label: "Recovery", value: "recovery" }, { label: "OmaPanel", value: "omapanel" }
+                        ]
+                        delegate: Button {
+                          required property var modelData
+                          text: modelData.label
+                          selected: root.doctorFilter === modelData.value
+                          onClicked: {
+                            root.doctorFilter = modelData.value
+                            root.selectedHealthIndex = 0
+                            root.detailOpen = false
+                            root.rebuildHealth()
+                          }
+                        }
+                      }
+                    }
+                  }
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                      Layout.fillWidth: true
+                      text: root.healthLoading ? "Running privilege-free checks…" : healthModel.count + " check" + (healthModel.count === 1 ? "" : "s") + " in this view"
+                      color: root.mutedText
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+                    Text {
+                      visible: root.doctorGeneratedAt !== ""
+                      text: "Last run " + root.doctorGeneratedAt.replace("T", " ").replace("Z", " UTC")
+                      color: root.mutedText
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
                   }
 
                   RowLayout {
@@ -1104,6 +1164,24 @@ Item {
                         clip: true
                         spacing: Style.spacing.xs
                         model: healthModel
+                        section.property: "category"
+                        section.criteria: ViewSection.FullString
+                        section.delegate: Item {
+                          required property string section
+                          width: healthList.width
+                          height: Style.space(32)
+                          Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: Style.spacing.sm
+                            anchors.bottom: parent.bottom
+                            anchors.bottomMargin: Style.spacing.xs
+                            text: parent.section.toUpperCase()
+                            color: root.mutedText
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            font.bold: true
+                          }
+                        }
                         QQC.ScrollBar.vertical: QQC.ScrollBar { id: healthScrollbar; policy: QQC.ScrollBar.AsNeeded }
                         delegate: CursorSurface {
                           id: healthDelegate
@@ -1143,13 +1221,13 @@ Item {
                         visible: !root.healthLoading && healthModel.count === 0
                         spacing: Style.spacing.sm
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.healthError ? "󰅚" : "󰒘"; color: root.healthError ? Color.urgent : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.displayLarge }
-                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.healthError || "No health results are available."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.healthError || "No Doctor results match this view."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
                       }
 
                       LoadingState {
                         anchors.centerIn: parent
                         visible: root.healthLoading && healthModel.count === 0
-                        label: "Running read-only health checks…"
+                        label: "Running Doctor's read-only checks…"
                       }
                     }
 
@@ -1176,6 +1254,8 @@ Item {
                           Layout.fillHeight: true
                           Text { width: parent.width; text: root.selectedHealthRow ? root.selectedHealthRow.detail : ""; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WrapAnywhere }
                         }
+                        PanelSectionHeader { Layout.fillWidth: true; text: "RECOMMENDED NEXT STEP"; foreground: root.foreground; fontFamily: Style.font.family }
+                        Text { Layout.fillWidth: true; text: root.selectedHealthRow ? root.selectedHealthRow.recommendation : ""; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
                         Button {
                           Layout.fillWidth: true
                           visible: root.selectedHealthRow && root.selectedHealthRow.actionAdapter
@@ -1184,15 +1264,7 @@ Item {
                           bordered: true
                           onClicked: root.requestSelectedAction()
                         }
-                        Button {
-                          Layout.fillWidth: true
-                          visible: root.selectedHealthRow && root.selectedHealthRow.id === "snapshots"
-                          text: "Open snapshot restore"
-                          iconText: "󰦛"
-                          bordered: true
-                          onClicked: root.requestAction("snapshot-restore", "_")
-                        }
-                        Text { Layout.fillWidth: true; text: "OmaPanel never requests privilege while checking this state."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                        Text { Layout.fillWidth: true; text: "Doctor never requests privilege or applies treatment."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
                       }
                     }
                   }
@@ -1210,7 +1282,9 @@ Item {
           message: {
             var p = root.pendingPreview || {}
             var command = p.argv && p.argv.length ? p.argv.join(" ") : ""
+            var impact = Model.previewLauncherImpact(p.impactedLaunchers)
             return String(p.label || "Continue") + "?\n\n" + String(p.workflow || "")
+              + impact
               + (command ? "\n\nWorkflow:\n" + command : "")
           }
           confirmText: root.pendingPreview && root.pendingPreview.destructive ? "Continue" : "Open"

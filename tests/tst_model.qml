@@ -8,7 +8,8 @@ TestCase {
   property var programs: [
     { name: "Alpha", kind: "app", source: "Pacman", sourceId: "alpha", advanced: false, searchText: "alpha app pacman" },
     { name: "Beta Web", kind: "webapp", source: "Omarchy", sourceId: "beta", advanced: false, searchText: "beta web omarchy" },
-    { name: "Gamma", kind: "package", source: "AUR", sourceId: "gamma", advanced: true, searchText: "gamma package aur" }
+    { name: "Gamma", kind: "package", source: "AUR", sourceId: "gamma", advanced: true, searchText: "gamma package aur" },
+    { name: "Node 22", kind: "mise", source: "Mise", sourceId: "node@22", advanced: true, searchText: "node 22 mise" }
   ]
 
   function test_filtering() {
@@ -16,6 +17,26 @@ TestCase {
     compare(Model.filterPrograms(programs, "beta", "all", false)[0].name, "Beta Web")
     compare(Model.filterPrograms(programs, "", "webapp", false).length, 1)
     compare(Model.filterPrograms(programs, "", "package", true).length, 1)
+    compare(Model.filterPrograms(programs, "", "mise", true).length, 1)
+  }
+
+  function test_doctor_filtering() {
+    var checks = [
+      { category: "Omarchy", status: "ok" },
+      { category: "Desktop", status: "warning" },
+      { category: "Desktop", status: "unknown" },
+      { category: "Storage", status: "error" }
+    ]
+    compare(Model.filterDoctor(checks, "all").length, 4)
+    compare(Model.filterDoctor(checks, "attention").length, 3)
+    compare(Model.filterDoctor(checks, "desktop").length, 2)
+  }
+
+  function test_launcher_impact() {
+    var row = { impactLauncherCount: 2, impactLauncherNames: ["Alpha", "Alpha Helper"] }
+    verify(Model.launcherImpactText(row).indexOf("2 launcher entries") !== -1)
+    verify(Model.launcherImpactText(row).indexOf("Alpha Helper") !== -1)
+    compare(Model.previewLauncherImpact([{name:"Alpha"}, {name:"Alpha Helper"}]), "\n\nLauncher entries affected (2):\nAlpha\nAlpha Helper")
   }
 
   function test_counts_hide_advanced() {

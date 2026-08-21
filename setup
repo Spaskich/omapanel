@@ -3,8 +3,12 @@
 set -euo pipefail
 
 PLUGIN_ID="spaskich.omapanel"
+PLUGIN_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SUMMON="omarchy-shell shell toggle $PLUGIN_ID '{}'"
 CONFIG_HOME="${OMAPANEL_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}"
+BIN_HOME="${OMAPANEL_BIN_HOME:-$HOME/.local/bin}"
+CLI_TARGET="$PLUGIN_ROOT/bin/omapanel"
+CLI_LINK="$BIN_HOME/omapanel"
 MENU_FILE="$CONFIG_HOME/omarchy/extensions/omarchy-menu.jsonc"
 BINDINGS_FILE="$CONFIG_HOME/hypr/bindings.lua"
 NO_KEYBIND=false
@@ -15,8 +19,9 @@ usage() {
   cat <<'EOF'
 Usage: ./setup [--no-keybind] [--remove]
 
-Adds OmaPanel to the Omarchy Setup menu and, when SUPER+I is free, adds the
-keyboard shortcut. Changes are marked, backed up, idempotent, and reversible.
+Adds OmaPanel to the Omarchy Setup menu, installs the `omapanel` terminal
+command, and, when SUPER+I is free, adds the keyboard shortcut. Changes are
+marked, backed up, idempotent, and reversible.
 EOF
 }
 
@@ -56,6 +61,44 @@ rollback() {
   for file in "${created_files[@]}"; do
     rm -f "$file"
   done
+}
+
+canonical_path() {
+  readlink -f -- "$1" 2>/dev/null || true
+}
+
+cli_link_owned() {
+  [[ -L $CLI_LINK ]] &&
+    [[ $(canonical_path "$CLI_LINK") == "$(canonical_path "$CLI_TARGET")" ]]
+}
+
+preflight_cli_link() {
+  [[ -x $CLI_TARGET ]] || {
+    echo "OmaPanel CLI entry point is missing or not executable: $CLI_TARGET" >&2
+    return 1
+  }
+  if [[ -e $CLI_LINK || -L $CLI_LINK ]]; then
+    cli_link_owned || {
+      echo "Refusing to replace an unrelated command at $CLI_LINK" >&2
+      return 1
+    }
+  fi
+}
+
+install_cli_link() {
+  cli_link_owned && return
+  mkdir -p "$BIN_HOME"
+  ln -s -- "$CLI_TARGET" "$CLI_LINK"
+  created_files+=("$CLI_LINK")
+}
+
+remove_cli_link() {
+  if cli_link_owned; then
+    rm -f -- "$CLI_LINK"
+    echo "Removed OmaPanel's managed CLI link at $CLI_LINK."
+  elif [[ -e $CLI_LINK || -L $CLI_LINK ]]; then
+    echo "Left unrelated command untouched at $CLI_LINK."
+  fi
 }
 
 ensure_base_files() {
@@ -244,13 +287,15 @@ if $REMOVE; then
     backup_file "$BINDINGS_FILE"
     remove_binding_block
   fi
+  remove_cli_link
   if [[ $SKIP_RUNTIME != true ]] && command -v hyprctl >/dev/null 2>&1; then
     hyprctl reload >/dev/null
   fi
-  echo "Removed OmaPanel's menu entry and managed keybinding. The plugin remains installed."
+  echo "Removed OmaPanel's menu entry, managed keybinding, and managed CLI link. The plugin remains installed."
   exit 0
 fi
 
+preflight_cli_link
 backup_file "$MENU_FILE"
 backup_file "$BINDINGS_FILE"
 ensure_base_files
@@ -263,6 +308,12 @@ fi
 if ! edit_menu add; then
   rollback
   echo "Could not update the Omarchy menu; restored the previous files." >&2
+  exit 1
+fi
+
+if ! install_cli_link; then
+  rollback
+  echo "Could not install the OmaPanel CLI; restored the previous files." >&2
   exit 1
 fi
 
@@ -294,6 +345,7 @@ if [[ $SKIP_RUNTIME != true ]]; then
 fi
 
 echo "OmaPanel is available under Setup -> OmaPanel."
+echo "Terminal Doctor: omapanel doctor"
 if $keybind_added; then
   echo "Keyboard shortcut: SUPER+I"
 fi
