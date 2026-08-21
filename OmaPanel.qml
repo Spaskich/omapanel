@@ -15,6 +15,7 @@ Item {
   property var manifest: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "spaskich.omapanel"
+  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.1.0"
   readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string backendPath: sourceDir + "/scripts/omapanel-backend"
   readonly property var appLibrary: shell ? shell.appLibrary : null
@@ -57,11 +58,15 @@ Item {
   readonly property color scrim: Color.menu.scrim
   readonly property color selectedBackground: Color.menu.selectedBackground
   readonly property color selectedText: Color.menu.selectedText
-  readonly property color mutedText: Color.muted
+  // Color.muted can be intentionally very quiet in terminal-oriented themes.
+  // Panels carry more explanatory copy, so follow Quattro's own PanelHero
+  // convention and derive a readable secondary tone from the surface text.
+  readonly property color mutedText: Qt.darker(foreground, 1.45)
   readonly property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
-  readonly property int cardWidth: Math.min(Style.space(1080), panel.width - Style.gapsOut * 4)
-  readonly property int cardHeight: Math.min(Style.space(720), panel.height - Style.gapsOut * 4)
-  readonly property bool narrow: cardWidth < Style.space(780)
+  readonly property int cardWidth: Math.min(Style.space(1180), panel.width - Style.gapsOut * 4)
+  readonly property bool narrow: cardWidth < Style.space(820)
+  readonly property int desiredCardHeight: pageIndex === 0 && !narrow ? Style.space(590) : Style.space(760)
+  readonly property int cardHeight: Math.min(desiredCardHeight, panel.height - Style.gapsOut * 4)
 
   readonly property var counts: {
     programRevision
@@ -301,11 +306,75 @@ Item {
     if (status === "error") return Color.urgent
     if (status === "warning") return Color.urgent
     if (status === "ok") return Color.accent
-    return Color.muted
+    return mutedText
+  }
+
+  function programIconSource(row) {
+    if (!row || !row.icon || !appLibrary) return ""
+    var kind = String(row.kind || "")
+    if (kind !== "app" && kind !== "webapp" && kind !== "tui" && kind !== "launcher" && kind !== "flatpak")
+      return ""
+    try { return String(appLibrary.iconSource(row.icon) || "") } catch (e) { return "" }
   }
 
   ListModel { id: programModel; dynamicRoles: true }
   ListModel { id: healthModel; dynamicRoles: true }
+
+  component ProgramIcon: Item {
+    id: programIcon
+    property var row: null
+    property int iconSize: Style.space(32)
+    readonly property string imageSource: root.programIconSource(row)
+
+    implicitWidth: iconSize
+    implicitHeight: iconSize
+
+    Image {
+      id: programIconImage
+      anchors.fill: parent
+      source: programIcon.imageSource
+      sourceSize.width: programIcon.iconSize * 2
+      sourceSize.height: programIcon.iconSize * 2
+      fillMode: Image.PreserveAspectFit
+      asynchronous: true
+    }
+
+    Text {
+      anchors.centerIn: parent
+      visible: programIconImage.status !== Image.Ready
+      text: Model.kindIcon(programIcon.row ? programIcon.row.kind : "", "")
+      color: root.selectedText
+      font.family: Style.font.family
+      font.pixelSize: Math.min(programIcon.iconSize, Style.font.iconLarge)
+    }
+  }
+
+  component LoadingState: Column {
+    property string label: "Loading…"
+    spacing: Style.spacing.md
+
+    Text {
+      anchors.horizontalCenter: parent.horizontalCenter
+      text: "󰑐"
+      color: root.selectedText
+      font.family: Style.font.family
+      font.pixelSize: Style.font.displayLarge
+      RotationAnimation on rotation {
+        from: 0
+        to: 360
+        duration: 900
+        loops: Animation.Infinite
+        running: parent.visible
+      }
+    }
+    Text {
+      anchors.horizontalCenter: parent.horizontalCenter
+      text: parent.label
+      color: root.mutedText
+      font.family: Style.font.family
+      font.pixelSize: Style.font.body
+    }
+  }
 
   Connections {
     target: root.appLibrary
@@ -426,6 +495,10 @@ Item {
       radius: Style.cornerRadius
       padding: Style.spacing.panelPadding
 
+      Behavior on height {
+        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+      }
+
       MouseArea { anchors.fill: parent; onClicked: {} }
 
       Item {
@@ -517,6 +590,14 @@ Item {
 
             Text {
               visible: root.programsLoading || root.healthLoading
+              text: root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Checking health"
+              color: root.mutedText
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              visible: root.programsLoading || root.healthLoading
               text: "󰑐"
               color: root.selectedText
               font.family: Style.font.family
@@ -524,6 +605,23 @@ Item {
               RotationAnimation on rotation {
                 from: 0; to: 360; duration: 900; loops: Animation.Infinite
                 running: parent.visible
+              }
+            }
+
+            BorderSurface {
+              implicitWidth: versionText.implicitWidth + Style.space(12)
+              implicitHeight: versionText.implicitHeight + Style.space(6)
+              color: "transparent"
+              borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+              radius: Style.cornerRadius
+              Text {
+                id: versionText
+                anchors.centerIn: parent
+                text: "v" + root.pluginVersion
+                color: root.mutedText
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                font.bold: true
               }
             }
 
@@ -545,7 +643,7 @@ Item {
 
             ColumnLayout {
               visible: !root.narrow
-              Layout.preferredWidth: Style.space(185)
+              Layout.preferredWidth: Style.space(205)
               Layout.fillHeight: true
               spacing: Style.spacing.sm
 
@@ -570,13 +668,20 @@ Item {
               }
 
               Item { Layout.fillHeight: true }
+              PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+              PanelSectionHeader {
+                Layout.fillWidth: true
+                text: "KEYBOARD"
+                foreground: root.foreground
+                fontFamily: Style.font.family
+              }
               Text {
                 Layout.fillWidth: true
-                text: "Keyboard\n↑↓ / j k  Navigate\n↵  Open    x  Action\n/  Search  Esc  Back"
+                text: "↑↓ / j k   Navigate\n↵           Open details\nx           Preview action\n/           Search\nEsc         Back"
                 color: root.mutedText
                 font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-                lineHeight: 1.25
+                font.pixelSize: Style.font.bodySmall
+                lineHeight: 1.2
               }
             }
 
@@ -623,26 +728,55 @@ Item {
 
                   Column {
                     width: overviewScroll.availableWidth
-                    spacing: Style.spacing.lg
+                    spacing: Style.space(14)
 
-                    Column {
+                    Row {
                       width: parent.width
-                      spacing: Style.spacing.xs
-                      Text {
-                        text: "Your Omarchy at a glance"
-                        color: root.foreground
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.display
-                        font.bold: true
+                      spacing: Style.space(14)
+
+                      BorderSurface {
+                        width: Style.space(52)
+                        height: Style.space(52)
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: Style.selectedFillFor(root.foreground, Color.accent)
+                        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                        radius: Style.cornerRadius
+                        Text {
+                          anchors.centerIn: parent
+                          text: "󰒓"
+                          color: root.selectedText
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.display
+                        }
                       }
-                      Text {
-                        width: parent.width
-                        text: "A clear map of installed software, system health, and the existing tools that manage them."
-                        color: root.mutedText
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        wrapMode: Text.WordWrap
+
+                      Column {
+                        width: parent.width - Style.space(66)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.spacing.xs
+                        Text {
+                          text: "Your Omarchy at a glance"
+                          color: root.foreground
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.display
+                          font.bold: true
+                        }
+                        Text {
+                          width: parent.width
+                          text: "One place to understand this system and reach the Omarchy tool that owns each change."
+                          color: root.mutedText
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.body
+                          wrapMode: Text.WordWrap
+                        }
                       }
+                    }
+
+                    PanelSectionHeader {
+                      width: parent.width
+                      text: "STATUS"
+                      foreground: root.foreground
+                      fontFamily: Style.font.family
                     }
 
                     GridLayout {
@@ -653,7 +787,7 @@ Item {
 
                       BorderSurface {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: Style.space(138)
+                        Layout.preferredHeight: Style.space(150)
                         color: Style.normalFillFor(root.foreground, Color.accent)
                         borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
                         padding: Style.spacing.panelPadding
@@ -662,15 +796,16 @@ Item {
                           anchors.margins: parent.contentLeftInset
                           spacing: Style.spacing.sm
                           Text { text: "󰀻  PROGRAMS"; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
-                          Text { text: root.counts.total + " visible items"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
-                          Text { width: parent.width; text: root.counts.webapp + " web apps · " + root.counts.plugin + " plugins · " + root.counts.tui + " TUIs"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                          Text { text: root.programsLoading && root.counts.total === 0 ? "Scanning…" : root.counts.total + " visible items"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                          Text { width: parent.width; text: root.counts.app + " apps · " + root.counts.webapp + " web · " + root.counts.plugin + " plugins · " + root.counts.tui + " TUIs"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                          Item { width: 1; height: Style.spacing.xs }
                           Button { text: "Browse programs"; iconText: "󰁔"; onClicked: root.setPage(1) }
                         }
                       }
 
                       BorderSurface {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: Style.space(138)
+                        Layout.preferredHeight: Style.space(150)
                         color: Style.normalFillFor(root.foreground, Color.accent)
                         borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
                         padding: Style.spacing.panelPadding
@@ -679,11 +814,19 @@ Item {
                           anchors.margins: parent.contentLeftInset
                           spacing: Style.spacing.sm
                           Text { text: Model.statusIcon(root.overall.status) + "  SYSTEM HEALTH"; color: root.statusColor(root.overall.status); font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
-                          Text { text: root.overall.label; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
-                          Text { width: parent.width; text: root.overall.count > 0 ? root.overall.count + " check(s) need attention" : "Diagnostics are read-only until you choose an action."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                          Text { text: root.healthLoading && root.healthRaw.length === 0 ? "Checking…" : root.overall.label; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                          Text { width: parent.width; text: root.overall.count > 0 ? root.overall.count + " of " + root.healthRaw.length + " checks need attention" : root.healthRaw.length + " read-only checks completed"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                          Item { width: 1; height: Style.spacing.xs }
                           Button { text: "Open health"; iconText: "󰁔"; onClicked: root.setPage(2) }
                         }
                       }
+                    }
+
+                    PanelSectionHeader {
+                      width: parent.width
+                      text: "QUICK HANDOFFS"
+                      foreground: root.foreground
+                      fontFamily: Style.font.family
                     }
 
                     BorderSurface {
@@ -699,15 +842,22 @@ Item {
                         anchors.top: parent.top
                         anchors.margins: parent.contentLeftInset
                         spacing: Style.spacing.md
-                        Text { text: "Quick handoffs"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.subtitle; font.bold: true }
-                        Text { width: parent.width; text: "OmaPanel does not replace system tools. It shows what will happen, then opens the workflow Omarchy already trusts."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                        Text { text: "Use the tools already trusted by Omarchy"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.subtitle; font.bold: true }
+                        Text { width: parent.width; text: "Every handoff is previewed first. OmaPanel never becomes a second package manager."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
                         Row {
                           spacing: Style.spacing.sm
-                          Button { text: "Run update"; iconText: "󰑐"; onClicked: root.requestAction("update", "_") }
-                          Button { text: "Restart shell"; iconText: "󰑓"; onClicked: root.requestAction("restart-shell", "_") }
-                          Button { text: "Copy report"; iconText: "󰆏"; onClicked: root.requestAction("copy-report", "_") }
+                          Button { text: "Run update"; iconText: "󰑐"; bordered: true; onClicked: root.requestAction("update", "_") }
+                          Button { text: "Restart shell"; iconText: "󰑓"; bordered: true; onClicked: root.requestAction("restart-shell", "_") }
+                          Button { text: "Copy report"; iconText: "󰆏"; bordered: true; onClicked: root.requestAction("copy-report", "_") }
                         }
                       }
+                    }
+
+                    Row {
+                      width: parent.width
+                      spacing: Style.spacing.md
+                      Text { text: "󰌾"; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.icon }
+                      Text { width: parent.width - Style.space(28); text: "Safe by default · collection is privilege-free, protected components stay protected, and changes require confirmation."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
                     }
                   }
                 }
@@ -718,7 +868,22 @@ Item {
 
                   RowLayout {
                     Layout.fillWidth: true
-                    spacing: Style.spacing.sm
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 0
+                      Text { text: "Programs"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                      Text { text: "Find software by what it is, then hand removal to the right tool."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                    }
+                    Button {
+                      iconText: "󰑐"
+                      iconSpinning: root.programsLoading
+                      tooltipText: "Refresh (Ctrl+R)"
+                      onClicked: root.refreshPrograms()
+                    }
+                  }
+
+                  RowLayout {
+                    Layout.fillWidth: true
                     TextField {
                       id: searchField
                       Layout.fillWidth: true
@@ -731,11 +896,6 @@ Item {
                           root.rebuildPrograms()
                         }
                       }
-                    }
-                    Button {
-                      iconText: "󰑐"
-                      tooltipText: "Refresh (Ctrl+R)"
-                      onClicked: root.refreshPrograms()
                     }
                   }
 
@@ -771,7 +931,7 @@ Item {
                     Layout.fillWidth: true
                     Text {
                       Layout.fillWidth: true
-                      text: programModel.count + " result" + (programModel.count === 1 ? "" : "s")
+                      text: root.programsLoading ? "Scanning… " + programModel.count + " found" : programModel.count + " result" + (programModel.count === 1 ? "" : "s")
                       color: root.mutedText
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
@@ -807,6 +967,7 @@ Item {
                         model: programModel
                         QQC.ScrollBar.vertical: QQC.ScrollBar { id: programScrollbar; policy: QQC.ScrollBar.AsNeeded }
                         delegate: CursorSurface {
+                          id: programDelegate
                           required property int index
                           property var row: programModel.get(index)
                           width: programList.width - (programScrollbar.visible ? Style.space(12) : 0)
@@ -821,14 +982,14 @@ Item {
                             anchors.leftMargin: Style.spacing.md
                             anchors.rightMargin: Style.spacing.md
                             spacing: Style.spacing.md
-                            Text { text: Model.kindIcon(parent.parent.row.kind, ""); color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.iconLarge }
+                            ProgramIcon { row: programDelegate.row; iconSize: Style.space(32) }
                             ColumnLayout {
                               Layout.fillWidth: true
                               spacing: 0
-                              Text { Layout.fillWidth: true; text: parent.parent.parent.row.name; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
-                              Text { Layout.fillWidth: true; text: parent.parent.parent.row.source + (parent.parent.parent.row.version ? " · " + parent.parent.parent.row.version : ""); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                              Text { Layout.fillWidth: true; text: programDelegate.row ? programDelegate.row.name : ""; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
+                              Text { Layout.fillWidth: true; text: programDelegate.row ? programDelegate.row.source + (programDelegate.row.version ? " · " + programDelegate.row.version : "") : ""; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                             }
-                            Text { visible: parent.parent.row.protected === true; text: "󰌾"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconSmall }
+                            Text { visible: programDelegate.row && programDelegate.row.protected === true; text: "󰌾"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconSmall }
                             Text { text: "󰁔"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconSmall }
                           }
 
@@ -849,6 +1010,12 @@ Item {
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.programsError ? "󰅚" : "󰍉"; color: root.programsError ? Color.urgent : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.displayLarge }
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.programsError || "No programs match this view."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
                       }
+
+                      LoadingState {
+                        anchors.centerIn: parent
+                        visible: root.programsLoading && programModel.count === 0
+                        label: "Building your software inventory…"
+                      }
                     }
 
                     BorderSurface {
@@ -865,10 +1032,11 @@ Item {
                         anchors.margins: parent.contentLeftInset
                         spacing: Style.spacing.md
                         Button { visible: root.narrow; text: "Back to programs"; iconText: "󰁍"; onClicked: root.detailOpen = false }
-                        Text { text: Model.kindIcon(root.selectedProgramRow ? root.selectedProgramRow.kind : "", ""); color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.displayLarge }
+                        ProgramIcon { row: root.selectedProgramRow; iconSize: Style.space(52) }
                         Text { Layout.fillWidth: true; text: root.selectedProgramRow ? root.selectedProgramRow.name : ""; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; wrapMode: Text.WordWrap }
                         Text { Layout.fillWidth: true; text: root.selectedProgramRow ? Model.kindLabel(root.selectedProgramRow.kind) + " · " + root.selectedProgramRow.source : ""; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
                         PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+                        PanelSectionHeader { Layout.fillWidth: true; text: "DETAILS"; foreground: root.foreground; fontFamily: Style.font.family }
                         Text { Layout.fillWidth: true; text: root.selectedProgramRow && root.selectedProgramRow.description ? root.selectedProgramRow.description : "No description is available."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
                         Text { Layout.fillWidth: true; text: root.selectedProgramRow ? "Managed by: " + root.selectedProgramRow.source + "\nID: " + root.selectedProgramRow.sourceId + (root.selectedProgramRow.version ? "\nVersion: " + root.selectedProgramRow.version : "") : ""; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
                         Item { Layout.fillHeight: true }
@@ -899,8 +1067,25 @@ Item {
                       Text { text: "Health & Recovery"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
                       Text { text: "Read-only checks first; repairs stay in Omarchy's existing workflows."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
                     }
+                    BorderSurface {
+                      visible: root.healthRaw.length > 0
+                      implicitWidth: healthSummary.implicitWidth + Style.space(16)
+                      implicitHeight: healthSummary.implicitHeight + Style.space(8)
+                      color: Style.normalFillFor(root.foreground, Color.accent)
+                      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                      radius: Style.cornerRadius
+                      Text {
+                        id: healthSummary
+                        anchors.centerIn: parent
+                        text: Model.statusIcon(root.overall.status) + "  " + root.overall.label
+                        color: root.statusColor(root.overall.status)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                      }
+                    }
                     Button { text: "Copy report"; iconText: "󰆏"; onClicked: root.requestAction("copy-report", "_") }
-                    Button { iconText: "󰑐"; tooltipText: "Refresh (Ctrl+R)"; onClicked: root.refreshHealth() }
+                    Button { iconText: "󰑐"; iconSpinning: root.healthLoading; tooltipText: "Refresh (Ctrl+R)"; onClicked: root.refreshHealth() }
                   }
 
                   RowLayout {
@@ -921,6 +1106,7 @@ Item {
                         model: healthModel
                         QQC.ScrollBar.vertical: QQC.ScrollBar { id: healthScrollbar; policy: QQC.ScrollBar.AsNeeded }
                         delegate: CursorSurface {
+                          id: healthDelegate
                           required property int index
                           property var row: healthModel.get(index)
                           width: healthList.width - (healthScrollbar.visible ? Style.space(12) : 0)
@@ -934,12 +1120,12 @@ Item {
                             anchors.leftMargin: Style.spacing.md
                             anchors.rightMargin: Style.spacing.md
                             spacing: Style.spacing.md
-                            Text { text: Model.statusIcon(parent.parent.row.status); color: root.statusColor(parent.parent.row.status); font.family: Style.font.family; font.pixelSize: Style.font.iconLarge }
+                            Text { text: Model.statusIcon(healthDelegate.row ? healthDelegate.row.status : "unknown"); color: root.statusColor(healthDelegate.row ? healthDelegate.row.status : "unknown"); font.family: Style.font.family; font.pixelSize: Style.font.iconLarge }
                             ColumnLayout {
                               Layout.fillWidth: true
                               spacing: 0
-                              Text { Layout.fillWidth: true; text: parent.parent.parent.row.title; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
-                              Text { Layout.fillWidth: true; text: parent.parent.parent.row.summary; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                              Text { Layout.fillWidth: true; text: healthDelegate.row ? healthDelegate.row.title : ""; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
+                              Text { Layout.fillWidth: true; text: healthDelegate.row ? healthDelegate.row.summary : ""; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                             }
                             Text { text: "󰁔"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconSmall }
                           }
@@ -958,6 +1144,12 @@ Item {
                         spacing: Style.spacing.sm
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.healthError ? "󰅚" : "󰒘"; color: root.healthError ? Color.urgent : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.displayLarge }
                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.healthError || "No health results are available."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                      }
+
+                      LoadingState {
+                        anchors.centerIn: parent
+                        visible: root.healthLoading && healthModel.count === 0
+                        label: "Running read-only health checks…"
                       }
                     }
 
@@ -978,6 +1170,7 @@ Item {
                         Text { Layout.fillWidth: true; text: root.selectedHealthRow ? root.selectedHealthRow.title : ""; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; wrapMode: Text.WordWrap }
                         Text { Layout.fillWidth: true; text: root.selectedHealthRow ? root.selectedHealthRow.summary : ""; color: root.statusColor(root.selectedHealthRow ? root.selectedHealthRow.status : "unknown"); font.family: Style.font.family; font.pixelSize: Style.font.body; wrapMode: Text.WordWrap }
                         PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+                        PanelSectionHeader { Layout.fillWidth: true; text: "WHAT OMAPANEL FOUND"; foreground: root.foreground; fontFamily: Style.font.family }
                         QQC.ScrollView {
                           Layout.fillWidth: true
                           Layout.fillHeight: true

@@ -75,7 +75,7 @@ export HOME="$TMP/home"
 export XDG_DATA_HOME="$TMP/home/.local/share"
 export XDG_DATA_DIRS="$TMP/system/share"
 
-programs="$($ROOT/scripts/omapanel-backend collect programs)"
+programs="$("$ROOT/scripts/omapanel-backend" collect programs)"
 jq -e '.schemaVersion == 1 and (.programs | length) == 7' <<<"$programs" >/dev/null || fail "unexpected program count"
 jq -e '.programs[] | select(.id == "desktop:fixture-web" and .kind == "webapp" and .actionAdapter == "webapp")' <<<"$programs" >/dev/null || fail "web app classification"
 jq -e '.programs[] | select(.id == "desktop:fixture-tui" and .kind == "tui")' <<<"$programs" >/dev/null || fail "TUI classification"
@@ -83,12 +83,12 @@ jq -e '.programs[] | select(.id == "desktop:fixture-package" and .sourceId == "f
 jq -e '.programs[] | select(.id == "plugin:fixture.community" and .removable == true)' <<<"$programs" >/dev/null || fail "community plugin"
 jq -e '.programs[] | select(.id == "plugin:omarchy.fixture" and .protected == true)' <<<"$programs" >/dev/null || fail "protected plugin"
 
-health="$($ROOT/scripts/omapanel-backend collect health)"
+health="$("$ROOT/scripts/omapanel-backend" collect health)"
 jq -e '.schemaVersion == 1 and (.health | length) >= 10' <<<"$health" >/dev/null || fail "health schema"
 
-preview="$($ROOT/scripts/omapanel-backend action --dry-run package fixture-package)"
+preview="$("$ROOT/scripts/omapanel-backend" action --dry-run package fixture-package)"
 jq -e '.ok and .terminal and (.argv | index("FZF_DEFAULT_QUERY=fixture-package"))' <<<"$preview" >/dev/null || fail "package preview"
-web_preview="$($ROOT/scripts/omapanel-backend action --dry-run webapp fixture-web)"
+web_preview="$("$ROOT/scripts/omapanel-backend" action --dry-run webapp fixture-web)"
 jq -e '.ok and (.argv | index("fixture-web"))' <<<"$web_preview" >/dev/null || fail "web app preview"
 if "$ROOT/scripts/omapanel-backend" action --dry-run package '../unsafe' >/dev/null 2>&1; then
   fail "unsafe target accepted"

@@ -3,7 +3,6 @@
 set -euo pipefail
 
 SCHEMA_VERSION=1
-OMAPANEL_ID="spaskich.omapanel"
 
 usage() {
   cat <<'EOF'
@@ -219,7 +218,7 @@ collect_plugins() {
     actionAdapter:(if .firstParty then "" else "plugin" end),
     actionTarget:(if .firstParty then "" else .id end),
     actionLabel:(if .firstParty then "" else "Open plugin remover" end),
-    workflow:(if .firstParty then "First-party plugins are protected system components." else "A terminal will open Omarchy’s interactive plugin removal workflow." end),
+    workflow:(if .firstParty then "First-party plugins are protected system components." else "A terminal will open the Omarchy interactive plugin removal workflow." end),
     warning:(if .firstParty then "It ships with Omarchy and cannot be uninstalled as a community plugin." else "The plugin will be disabled before its files are removed or backed up." end),
     advanced:false,
     enabled:(.enabled // false),
@@ -262,8 +261,8 @@ collect_explicit_packages() {
           source:(if ($foreign | index(.[0])) then "AUR / foreign package" else "Pacman package" end),
           sourceId:.[0], version:(.[1] // ""), removable:true, protected:false,
           actionAdapter:"package", actionTarget:.[0], actionLabel:"Open package remover",
-          workflow:("A terminal will open Omarchy’s package remover with " + .[0] + " prefilled."),
-          warning:"Review Pacman’s dependency list before confirming removal.", advanced:true,
+          workflow:("A terminal will open the Omarchy package remover with " + .[0] + " prefilled."),
+          warning:"Review the Pacman dependency list before confirming removal.", advanced:true,
           searchText:([.[0],.[1],"package",(if ($foreign | index(.[0])) then "aur foreign" else "pacman" end)] | join(" ") | ascii_downcase)
         })'
 }
@@ -301,13 +300,13 @@ health_json() {
 }
 
 disk_health() {
-  local id="$1" title="$2" path="$3" line percent used available status summary
+  local id="$1" title="$2" path="$3" line percent available status summary
   line="$(df -P -B1 "$path" 2>/dev/null | awk 'NR==2 {print $3, $4, $5}')"
   if [[ -z $line ]]; then
     health_json "$id" "$title" unknown "Usage could not be read" "$path"
     return
   fi
-  read -r used available percent <<<"$line"
+  read -r _ available percent <<<"$line"
   percent="${percent%%%}"
   if (( percent >= 90 )); then status=error
   elif (( percent >= 80 )); then status=warning
@@ -434,7 +433,7 @@ validate_target() {
     tui)
       [[ -n $target && $target != *[[:cntrl:]]* ]]
       desktop_file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$target.desktop"
-      [[ -f $desktop_file ]] && grep -qE '^Exec=.*(\$TERMINAL|xdg-terminal-exec).*(-e|-[[:alpha:]]*e)([[:space:]]|$)' "$desktop_file"
+      [[ -f $desktop_file ]] && grep -qE '^Exec=.*([$]TERMINAL|xdg-terminal-exec).*(-e|-[[:alpha:]]*e)([[:space:]]|$)' "$desktop_file"
       ;;
     launcher)
       [[ -n $target && $target != *[[:cntrl:]]* ]]

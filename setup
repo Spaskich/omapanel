@@ -207,15 +207,19 @@ PY
 
 super_i_free() {
   if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    ! hyprctl binds -j 2>/dev/null |
-      jq -e '.[] | select(((.key // "") | ascii_upcase) == "I" and (.modmask == 64))' >/dev/null
-    return
+    if hyprctl binds -j 2>/dev/null |
+      jq -e '.[] | select(((.key // "") | ascii_upcase) == "I" and (.modmask == 64))' >/dev/null; then
+      return 1
+    fi
+    return 0
   fi
 
   if command -v omarchy >/dev/null 2>&1; then
-    ! omarchy menu keybindings --print 2>/dev/null |
-      awk '$1 == "SUPER" && $2 == "+" && $3 == "I" { found=1 } END { exit !found }'
-    return
+    if omarchy menu keybindings --print 2>/dev/null |
+      awk '$1 == "SUPER" && $2 == "+" && $3 == "I" { found=1 } END { exit !found }'; then
+      return 1
+    fi
+    return 0
   fi
 
   return 1
