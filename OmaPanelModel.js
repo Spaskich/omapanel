@@ -120,15 +120,11 @@ function kindIcon(kind, fallback) {
 
 function launcherImpactText(row) {
   if (!row || Number(row.impactLauncherCount || 0) <= 0) return ""
-  var names = row.impactLauncherNames
-  var list = []
-  if (Array.isArray(names)) list = names
-  else if (names && typeof names.length === "number") {
-    for (var i = 0; i < names.length; i++) list.push(String(names[i]))
-  }
+  var namesText = String(row.impactLauncherNamesText || "")
+  if (namesText === "" && Array.isArray(row.impactLauncherNames)) namesText = row.impactLauncherNames.join("\n")
   return Number(row.impactLauncherCount) + " launcher entr"
     + (Number(row.impactLauncherCount) === 1 ? "y" : "ies")
-    + " discovered:\n" + list.join("\n")
+    + " discovered:\n" + namesText
 }
 
 function previewLauncherImpact(launchers) {

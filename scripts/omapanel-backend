@@ -350,7 +350,7 @@ collect_mise_tools() {
             workflow:"Mise owns this tool version. OmaPanel does not remove it because active mise.toml files may still request it.",
             warning:"Visibility only: mise uninstall removes files without updating the configuration that requested them.",
             advanced:true, active:(.active // false),
-            impactLauncherIds:[], impactLauncherNames:[], impactLauncherCount:0,
+            impactLauncherIds:[], impactLauncherNames:[], impactLauncherNamesText:"", impactLauncherCount:0,
             searchText:([$tool,.version,"mise","development tool",(if .active then "active" else "inactive" end)] | join(" ") | ascii_downcase)
           })
     | sort_by(.name | ascii_downcase)
@@ -396,12 +396,14 @@ collect_programs() {
             | . + {
                 impactLauncherIds:($launchers | map(.id)),
                 impactLauncherNames:($launchers | map(.name)),
+                impactLauncherNamesText:($launchers | map(.name) | join("\n")),
                 impactLauncherCount:($launchers | length)
               }
           else
             . + {
               impactLauncherIds:(.impactLauncherIds // []),
               impactLauncherNames:(.impactLauncherNames // []),
+              impactLauncherNamesText:(.impactLauncherNamesText // ""),
               impactLauncherCount:(.impactLauncherCount // 0)
             }
           end)

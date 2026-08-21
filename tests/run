@@ -125,7 +125,7 @@ jq -e '.programs[] | select(.id == "desktop:fixture-package" and .sourceId == "f
 jq -e '.programs[] | select(.id == "plugin:fixture.community" and .removable == true)' <<<"$programs" >/dev/null || fail "community plugin"
 jq -e '.programs[] | select(.id == "plugin:omarchy.fixture" and .protected == true)' <<<"$programs" >/dev/null || fail "protected plugin"
 jq -e '.programs[] | select(.id == "mise:node@22.1.0" and .kind == "mise" and .active == true and .removable == false and .actionAdapter == "")' <<<"$programs" >/dev/null || fail "Mise visibility-only tool"
-jq -e '.programs[] | select(.id == "package:fixture-package" and .impactLauncherCount == 3 and (.impactLauncherNames | index("Fixture Package Hidden Helper")))' <<<"$programs" >/dev/null || fail "package launcher impact"
+jq -e '.programs[] | select(.id == "package:fixture-package" and .impactLauncherCount == 3 and (.impactLauncherNames | index("Fixture Package Hidden Helper")) and (.impactLauncherNamesText | contains("Fixture Package Hidden Helper")))' <<<"$programs" >/dev/null || fail "package launcher impact"
 jq -e '.providers.mise == "ok" and (.errors | length) == 0' <<<"$programs" >/dev/null || fail "Mise provider status"
 
 programs_without_mise="$(FIXTURE_MISE_FAIL=true "$ROOT/scripts/omapanel-backend" collect programs)"

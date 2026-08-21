@@ -33,7 +33,7 @@ TestCase {
   }
 
   function test_launcher_impact() {
-    var row = { impactLauncherCount: 2, impactLauncherNames: ["Alpha", "Alpha Helper"] }
+    var row = { impactLauncherCount: 2, impactLauncherNames: ["Alpha", "Alpha Helper"], impactLauncherNamesText: "Alpha\nAlpha Helper" }
     verify(Model.launcherImpactText(row).indexOf("2 launcher entries") !== -1)
     verify(Model.launcherImpactText(row).indexOf("Alpha Helper") !== -1)
     compare(Model.previewLauncherImpact([{name:"Alpha"}, {name:"Alpha Helper"}]), "\n\nLauncher entries affected (2):\nAlpha\nAlpha Helper")
