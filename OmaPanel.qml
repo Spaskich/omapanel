@@ -462,7 +462,8 @@ Item {
   component PersistentScrollBar: QQC.ScrollBar {
     id: persistentBar
     policy: QQC.ScrollBar.AsNeeded
-    active: true
+    visible: size < 0.999
+    active: visible
     interactive: true
     implicitWidth: Style.space(10)
 
@@ -951,9 +952,10 @@ Item {
                 QQC.ScrollView {
                   id: overviewScroll
                   clip: true
-                  rightPadding: Style.space(18)
+                  rightPadding: overviewScrollbar.visible ? Style.space(18) : 0
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
                   QQC.ScrollBar.vertical: PersistentScrollBar {
+                    id: overviewScrollbar
                     parent: overviewScroll
                     anchors.top: overviewScroll.top
                     anchors.right: overviewScroll.right
@@ -1118,9 +1120,10 @@ Item {
                 QQC.ScrollView {
                   id: appearanceScroll
                   clip: true
-                  rightPadding: Style.space(18)
+                  rightPadding: appearanceScrollbar.visible ? Style.space(18) : 0
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
                   QQC.ScrollBar.vertical: PersistentScrollBar {
+                    id: appearanceScrollbar
                     parent: appearanceScroll
                     anchors.top: appearanceScroll.top
                     anchors.right: appearanceScroll.right
