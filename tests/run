@@ -264,12 +264,12 @@ jq -e '.input.state == "unavailable" and (.errors[] | select(.provider == "input
 devices_without_network="$(FIXTURE_NETWORK_FAIL=true "$ROOT/scripts/omapanel-backend" collect devices)"
 jq -e '.network.state == "unavailable" and (.errors[] | select(.provider == "network")) and .display.state == "ok"' <<<"$devices_without_network" >/dev/null || fail "device network failure isolation"
 
-touchpad_result="$($ROOT/scripts/omapanel-backend devices set touchpad false)"
+touchpad_result="$("$ROOT/scripts/omapanel-backend" devices set touchpad false)"
 jq -e '.ok and .setting == "touchpad" and .value == false and .previous == true' <<<"$touchpad_result" >/dev/null || fail "touchpad setting result"
 [[ -e $XDG_STATE_HOME/omarchy/toggles/hypr/touchpad-disabled.lua ]] || fail "touchpad was not disabled"
-$ROOT/scripts/omapanel-backend devices set touchpad false >/dev/null
+"$ROOT/scripts/omapanel-backend" devices set touchpad false >/dev/null
 [[ $(grep -c '^toggle touchpad off$' "$FIXTURE_ACTION_LOG") == 1 ]] || fail "touchpad desired state toggled twice"
-$ROOT/scripts/omapanel-backend devices set touchpad true >/dev/null
+"$ROOT/scripts/omapanel-backend" devices set touchpad true >/dev/null
 [[ ! -e $XDG_STATE_HOME/omarchy/toggles/hypr/touchpad-disabled.lua ]] || fail "touchpad was not enabled"
 if FIXTURE_TOUCHPAD_APPLY_FAIL=true "$ROOT/scripts/omapanel-backend" devices set touchpad false >/dev/null 2>&1; then fail "unverified touchpad change accepted"; fi
 if "$ROOT/scripts/omapanel-backend" devices set touchpad maybe >/dev/null 2>&1; then fail "invalid touchpad value accepted"; fi
