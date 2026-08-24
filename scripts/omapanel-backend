@@ -794,7 +794,7 @@ storage_user_cache_summary() {
 }
 
 storage_snapshot_summary() {
-  local state=unavailable configs_output="" list_output="" config name subvolume scope_state error_message list_rc
+  local state=unavailable configs_output="" list_output="" name subvolume scope_state error_message list_rc
   local configs='[]' snapshots='[]'
   local -a scopes=()
 
@@ -855,7 +855,7 @@ collect_storage() {
   local block_state=unavailable mount_state=unavailable lsblk_output='' findmnt_output=''
   local drives='[]' filesystems='[]' health='[]'
   local package_cache orphans journal user_cache snapshots
-  local -a errors=()
+  local -a storage_errors=()
 
   if command -v lsblk >/dev/null 2>&1 && timed_capture lsblk_output lsblk --json --bytes \
     --output NAME,PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS,LABEL,MODEL,VENDOR,TRAN,ROTA,RM,RO &&
@@ -875,7 +875,7 @@ collect_storage() {
     block_state=ok
     health="$(collect_storage_health "$drives")"
   else
-    errors+=("$(storage_error_json block-devices 'Physical drives and partitions could not be read.')")
+    storage_errors+=("$(storage_error_json block-devices 'Physical drives and partitions could not be read.')")
   fi
 
   if command -v findmnt >/dev/null 2>&1 && timed_capture findmnt_output findmnt --json --bytes --real \
@@ -900,7 +900,7 @@ collect_storage() {
       <<<"$findmnt_output")"
     mount_state=ok
   else
-    errors+=("$(storage_error_json filesystems 'Mounted filesystem usage could not be read.')")
+    storage_errors+=("$(storage_error_json filesystems 'Mounted filesystem usage could not be read.')")
   fi
 
   package_cache="$(storage_cache_summary)"
@@ -914,7 +914,7 @@ collect_storage() {
     --argjson drives "$drives" --argjson filesystems "$filesystems" --argjson health "$health" \
     --argjson packageCache "$package_cache" --argjson orphans "$orphans" \
     --argjson journal "$journal" --argjson userCache "$user_cache" --argjson snapshots "$snapshots" \
-    --argjson errors "$(json_lines_to_array "${errors[@]}")" \
+    --argjson errors "$(json_lines_to_array "${storage_errors[@]}")" \
     '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,
       providers:{blockDevices:$blockState,filesystems:$mountState,
         health:(if ($health | length) == 0 then "unavailable"

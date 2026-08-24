@@ -375,7 +375,7 @@ jq -e '.snapshots.scopes[0].state == "permission-denied" and .snapshots.snapshot
 readable_storage="$(FIXTURE_SNAPPER_READABLE=true "$ROOT/scripts/omapanel-backend" collect storage)"
 jq -e '.snapshots.scopes[0].state == "ok" and .snapshots.snapshotCount == 1 and .snapshots.scopes[0].snapshots[0].description == "Fixture snapshot"' <<<"$readable_storage" >/dev/null || fail "storage readable snapshots"
 
-scan_output="$($ROOT/scripts/omapanel-backend storage scan "$FIXTURE_SCAN_PICKER")"
+scan_output="$("$ROOT/scripts/omapanel-backend" storage scan "$FIXTURE_SCAN_PICKER")"
 jq -s -e '.[0].event == "started" and .[-1].event == "completed" and .[-1].totalBytes > 0 and .[-1].directFileBytes > 0 and ([.[] | select(.event == "entry" and .name == "folder one" and .sizeBytes > 0)] | length) == 1' <<<"$scan_output" >/dev/null || fail "progressive storage scan"
 set +e
 invalid_scan="$("$ROOT/scripts/omapanel-backend" storage scan relative/path 2>/dev/null)"
@@ -384,7 +384,7 @@ set -e
 [[ $invalid_scan_rc == 2 ]] || fail "relative storage scan accepted"
 jq -e '.event == "error" and (.message | contains("not readable"))' <<<"$invalid_scan" >/dev/null || fail "storage scan error event"
 
-picker_output="$($ROOT/scripts/omapanel-backend storage choose-directory)"
+picker_output="$("$ROOT/scripts/omapanel-backend" storage choose-directory)"
 jq -e --arg path "$FIXTURE_SCAN_PICKER" '.ok and (.cancelled | not) and .path == $path' <<<"$picker_output" >/dev/null || fail "storage folder picker"
 "$ROOT/scripts/omapanel-backend" storage open "$FIXTURE_SCAN_PICKER"
 grep -Fx "gio open $FIXTURE_SCAN_PICKER" "$FIXTURE_ACTION_LOG" >/dev/null || fail "storage file-manager handoff"
@@ -401,9 +401,9 @@ set -e
 [[ $cancel_rc == 130 ]] || fail "storage scan cancellation exit code"
 jq -s -e '.[0].event == "started" and .[-1].event == "cancelled"' "$cancel_output" >/dev/null || fail "storage scan cancellation event"
 
-cache_preview="$($ROOT/scripts/omapanel-backend action --dry-run cache-prune _)"
+cache_preview="$("$ROOT/scripts/omapanel-backend" action --dry-run cache-prune _)"
 jq -e '.ok and .terminal and .destructive and (.argv | join(" ") | contains("omarchy update pkg prune"))' <<<"$cache_preview" >/dev/null || fail "cache prune preview"
-speed_preview="$($ROOT/scripts/omapanel-backend action --dry-run disk-speedtest _)"
+speed_preview="$("$ROOT/scripts/omapanel-backend" action --dry-run disk-speedtest _)"
 jq -e '.ok and (.destructive | not) and (.workflow | contains("temporary benchmark file")) and (.argv | join(" ") | contains("omarchy.disk-speedtest"))' <<<"$speed_preview" >/dev/null || fail "disk speed-test preview"
 if "$ROOT/scripts/omapanel-backend" action --dry-run cache-prune unsafe >/dev/null 2>&1; then fail "storage action target accepted"; fi
 
