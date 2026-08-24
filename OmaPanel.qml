@@ -459,6 +459,29 @@ Item {
     }
   }
 
+  component PersistentScrollBar: QQC.ScrollBar {
+    id: persistentBar
+    policy: QQC.ScrollBar.AlwaysOn
+    active: true
+    interactive: true
+    implicitWidth: Style.space(10)
+
+    contentItem: Rectangle {
+      implicitWidth: Style.space(6)
+      implicitHeight: Style.space(48)
+      radius: width / 2
+      color: root.foreground
+      opacity: persistentBar.hovered || persistentBar.pressed ? 0.9 : 0.62
+    }
+
+    background: Rectangle {
+      implicitWidth: Style.space(6)
+      radius: width / 2
+      color: root.foreground
+      opacity: 0.12
+    }
+  }
+
   component LoadingState: Column {
     property string label: "Loading…"
     spacing: Style.spacing.md
@@ -930,10 +953,7 @@ Item {
                   clip: true
                   rightPadding: Style.space(18)
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
-                  QQC.ScrollBar.vertical: QQC.ScrollBar {
-                    policy: QQC.ScrollBar.AlwaysOn
-                    active: true
-                  }
+                  QQC.ScrollBar.vertical: PersistentScrollBar { }
 
                   Column {
                     width: overviewScroll.availableWidth
@@ -1095,10 +1115,7 @@ Item {
                   clip: true
                   rightPadding: Style.space(18)
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
-                  QQC.ScrollBar.vertical: QQC.ScrollBar {
-                    policy: QQC.ScrollBar.AlwaysOn
-                    active: true
-                  }
+                  QQC.ScrollBar.vertical: PersistentScrollBar { }
 
                   Column {
                     width: appearanceScroll.availableWidth
@@ -1533,10 +1550,8 @@ Item {
                         clip: true
                         spacing: Style.spacing.xs
                         model: programModel
-                        QQC.ScrollBar.vertical: QQC.ScrollBar {
+                        QQC.ScrollBar.vertical: PersistentScrollBar {
                           id: programScrollbar
-                          policy: QQC.ScrollBar.AlwaysOn
-                          active: true
                         }
                         delegate: CursorSurface {
                           id: programDelegate
@@ -1749,10 +1764,8 @@ Item {
                             font.bold: true
                           }
                         }
-                        QQC.ScrollBar.vertical: QQC.ScrollBar {
+                        QQC.ScrollBar.vertical: PersistentScrollBar {
                           id: healthScrollbar
-                          policy: QQC.ScrollBar.AlwaysOn
-                          active: true
                         }
                         delegate: CursorSurface {
                           id: healthDelegate
