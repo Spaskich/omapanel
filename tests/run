@@ -207,12 +207,14 @@ if "$ROOT/scripts/omapanel-backend" appearance handoff '../unsafe' >/dev/null 2>
 [[ ! -e $XDG_STATE_HOME/omarchy/toggles/bar-off ]] || fail "bar was not shown"
 "$ROOT/scripts/omapanel-backend" appearance handoff theme
 "$ROOT/scripts/omapanel-backend" appearance handoff background
+"$ROOT/scripts/omapanel-backend" appearance handoff unlock
 "$ROOT/scripts/omapanel-backend" appearance handoff font-install
 "$ROOT/scripts/omapanel-backend" appearance handoff display
 grep -Fx 'theme picker' "$FIXTURE_ACTION_LOG" >/dev/null || fail "theme picker handoff"
 grep -Fx 'theme set Fixture Dawn' "$FIXTURE_ACTION_LOG" >/dev/null || fail "theme setter handoff"
 grep -Fx 'background picker' "$FIXTURE_ACTION_LOG" >/dev/null || fail "background picker handoff"
 grep -Fx 'background set /tmp/fixture-background.jpg' "$FIXTURE_ACTION_LOG" >/dev/null || fail "background setter handoff"
+grep -Fx 'menu summon style.unlock' "$FIXTURE_ACTION_LOG" >/dev/null || fail "unlock picker handoff"
 grep -Fx 'menu summon install.style.font' "$FIXTURE_ACTION_LOG" >/dev/null || fail "font install handoff"
 grep -Fx 'shell omarchy.monitor show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "display panel handoff"
 

@@ -461,7 +461,7 @@ Item {
 
   component PersistentScrollBar: QQC.ScrollBar {
     id: persistentBar
-    policy: QQC.ScrollBar.AlwaysOn
+    policy: QQC.ScrollBar.AsNeeded
     active: true
     interactive: true
     implicitWidth: Style.space(10)
@@ -1165,7 +1165,7 @@ Item {
 
                     BorderSurface {
                       width: parent.width
-                      implicitHeight: Math.max(backgroundPreview.implicitHeight, styleDetails.implicitHeight) + Style.spacing.panelPadding * 2
+                      implicitHeight: Math.max(backgroundPreview.height, styleDetails.implicitHeight) + Style.spacing.panelPadding * 2
                       color: Style.normalFillFor(root.foreground, Color.accent)
                       borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
                       padding: Style.spacing.panelPadding
@@ -1212,6 +1212,7 @@ Item {
                             spacing: Style.spacing.sm
                             Button { text: "Change theme"; iconText: "󰏘"; bordered: true; focusable: true; enabled: root.appearance.theme.state === "ok"; onClicked: root.requestAppearanceHandoff("theme") }
                             Button { text: "Change background"; iconText: "󰋩"; bordered: true; focusable: true; enabled: root.appearance.background.state === "ok"; onClicked: root.requestAppearanceHandoff("background") }
+                            Button { text: "Unlock screen"; iconText: "󰟵"; tooltipText: "Change Omarchy's unlock screen"; bordered: true; focusable: true; enabled: !root.appearanceBusy; onClicked: root.requestAppearanceHandoff("unlock") }
                           }
                         }
                       }

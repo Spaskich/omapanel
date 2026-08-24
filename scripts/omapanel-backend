@@ -20,7 +20,7 @@ Usage:
   omapanel-backend collect health
   omapanel-backend collect appearance
   omapanel-backend appearance set <font|text-size|bar-position|bar-transparency|bar-visible> <value>
-  omapanel-backend appearance handoff <theme|background|font-install|display>
+  omapanel-backend appearance handoff <theme|background|unlock|font-install|display>
   omapanel-backend doctor [--json] [--copy | --output <path>]
   omapanel-backend action [--dry-run] <adapter> <target>
 EOF
@@ -662,6 +662,7 @@ appearance_handoff() {
       selection="$(omarchy-theme-bg-switcher)" || selection=""
       [[ -z $selection ]] || omarchy-theme-bg-set "$selection"
       ;;
+    unlock) exec omarchy menu summon style.unlock ;;
     font-install) exec omarchy menu summon install.style.font ;;
     display) exec omarchy shell omarchy.monitor show ;;
     *) echo "Unknown appearance handoff: $1" >&2; return 2 ;;

@@ -61,7 +61,7 @@ scripts/omapanel-backend collect doctor
 scripts/omapanel-backend collect health
 scripts/omapanel-backend collect appearance
 scripts/omapanel-backend appearance set <setting> <value>
-scripts/omapanel-backend appearance handoff <target>
+scripts/omapanel-backend appearance handoff <theme|background|unlock|font-install|display>
 scripts/omapanel-backend doctor [--json] [--copy | --output <path>]
 scripts/omapanel-backend action --dry-run <adapter> <target>
 scripts/omapanel-backend action <adapter> <target>

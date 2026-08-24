@@ -14,6 +14,7 @@ to the existing Omarchy command or workflow that already owns the operation.
 - Live Omarchy theme, type-scale, spacing, focus, and surface colors.
 - Current theme and background preview with native Omarchy picker handoffs that
   return to the same OmaPanel view when selection finishes.
+- Unlock-screen customization through Omarchy's existing Style workflow.
 - Installed-font selection, global text-size controls, and one-level undo.
 - Bar visibility, position, and transparency through canonical Omarchy
   commands.
@@ -29,7 +30,8 @@ to the existing Omarchy command or workflow that already owns the operation.
 - Privacy-reviewed clipboard reports and safe handoffs to existing Omarchy
   update, journal, configuration, and recovery workflows.
 - Full keyboard navigation with the same selection model used by mouse hover.
-- Persistent vertical scrollbars and wheel-safe text-size controls.
+- Persistent vertical scrollbars when content overflows and wheel-safe
+  text-size controls.
 - Idempotent, backed-up, reversible menu and keybinding setup.
 
 ## Requirements

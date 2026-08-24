@@ -49,6 +49,20 @@
 - Formatting, partition editing, and other destructive disk operations remain
   excluded until Omarchy provides a canonical safe backend.
 
+## v0.6 — Extended personalization
+
+- Complete the useful remainder of Omarchy's Style surface after Devices and
+  Storage, while continuing to hand ownership to the canonical workflows.
+- Summarize Hyprland look-and-feel state and open Omarchy's existing config
+  editor; do not build a second editor or write `looknfeel.lua` directly.
+- Preview Screensaver branding and hand text, image, and restore-default
+  actions to Omarchy's existing Style menu workflows, with confirmation before
+  reset.
+- Preview About branding and hand text, image, and restore-default actions to
+  Omarchy's existing Style menu workflows, with confirmation before reset.
+- Keep Theme, Background, Unlock, Font, and Menu Bar in Appearance rather than
+  duplicating them in this later milestone.
+
 ## Core adoption
 
 - Move to reserved ID `omarchy.omapanel`.

@@ -10,7 +10,9 @@
   text-size wheel changes are blocked, scrollbars stay visible, and every page
   uses the same panel height.
 - Persistent scrollbars use a reserved right-side gutter instead of covering
-  the page content.
+  the page content and hide when the current view does not overflow.
+- Added an Unlock screen button that delegates to Omarchy's existing Style
+  workflow, and corrected the Style card height around its background preview.
 - Added installed-font selection, the Omarchy font installer handoff, and
   global text-size stops shared with Quattro's Display panel.
 - Added basic bar visibility, position, and transparency controls through
