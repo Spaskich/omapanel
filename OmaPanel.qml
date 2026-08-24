@@ -82,7 +82,7 @@ Item {
   readonly property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
   readonly property int cardWidth: Math.min(Style.space(1180), panel.width - Style.gapsOut * 4)
   readonly property bool narrow: cardWidth < Style.space(820)
-  readonly property int desiredCardHeight: pageIndex === 0 && !narrow ? Style.space(590) : Style.space(760)
+  readonly property int desiredCardHeight: Style.space(760)
   readonly property int cardHeight: Math.min(desiredCardHeight, panel.height - Style.gapsOut * 4)
 
   readonly property var counts: {
@@ -587,8 +587,18 @@ Item {
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handoffOutput = text }
     stderr: StdioCollector { id: handoffStderr; waitForEnd: true }
     onExited: function(exitCode) {
-      if (exitCode === 0) root.requestClose()
-      else root.showToast(String(handoffStderr.text || "The Omarchy workflow could not be opened.").trim())
+      var returnsHere = root.pendingHandoff === "theme" || root.pendingHandoff === "background"
+      if (exitCode === 0) {
+        if (returnsHere) {
+          root.refreshAppearance()
+          Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+        } else {
+          root.requestClose()
+        }
+      } else {
+        root.showToast(String(handoffStderr.text || "The Omarchy workflow could not be opened.").trim())
+        if (returnsHere) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      }
     }
   }
 
@@ -919,6 +929,7 @@ Item {
                   id: overviewScroll
                   clip: true
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
+                  QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AlwaysOn
 
                   Column {
                     width: overviewScroll.availableWidth
@@ -1079,6 +1090,7 @@ Item {
                   id: appearanceScroll
                   clip: true
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
+                  QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AlwaysOn
 
                   Column {
                     width: appearanceScroll.availableWidth
@@ -1160,7 +1172,7 @@ Item {
                           spacing: Style.spacing.sm
                           Text { text: root.appearance.theme.state === "ok" ? root.appearance.theme.current : "Theme unavailable"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight; width: parent.width }
                           Text { text: root.appearance.background.state === "ok" ? root.appearance.background.current : "Background unavailable"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight; width: parent.width }
-                          Text { text: "Selection stays in Omarchy’s native pickers."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; width: parent.width }
+                          Text { text: "Selection stays in Omarchy’s native pickers, then returns here."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; width: parent.width }
                           Row {
                             spacing: Style.spacing.sm
                             Button { text: "Change theme"; iconText: "󰏘"; bordered: true; focusable: true; enabled: root.appearance.theme.state === "ok"; onClicked: root.requestAppearanceHandoff("theme") }
@@ -1279,6 +1291,15 @@ Item {
                             onReleased: function(value) {
                               var index = Math.max(0, Math.min(root.appearance.textSize.stops.length - 1, Math.round(value)))
                               root.requestAppearanceSetting("text-size", root.appearance.textSize.stops[index])
+                            }
+                          }
+                          WheelHandler {
+                            onWheel: function(event) {
+                              var distance = event.pixelDelta.y !== 0
+                                ? -event.pixelDelta.y
+                                : -event.angleDelta.y / 2
+                              if (distance !== 0) root.scrollAppearance(distance)
+                              event.accepted = true
                             }
                           }
                         }
@@ -1502,7 +1523,7 @@ Item {
                         clip: true
                         spacing: Style.spacing.xs
                         model: programModel
-                        QQC.ScrollBar.vertical: QQC.ScrollBar { id: programScrollbar; policy: QQC.ScrollBar.AsNeeded }
+                        QQC.ScrollBar.vertical: QQC.ScrollBar { id: programScrollbar; policy: QQC.ScrollBar.AlwaysOn }
                         delegate: CursorSurface {
                           id: programDelegate
                           required property int index
@@ -1714,7 +1735,7 @@ Item {
                             font.bold: true
                           }
                         }
-                        QQC.ScrollBar.vertical: QQC.ScrollBar { id: healthScrollbar; policy: QQC.ScrollBar.AsNeeded }
+                        QQC.ScrollBar.vertical: QQC.ScrollBar { id: healthScrollbar; policy: QQC.ScrollBar.AlwaysOn }
                         delegate: CursorSurface {
                           id: healthDelegate
                           required property int index

@@ -647,10 +647,21 @@ appearance_set() {
 }
 
 appearance_handoff() {
+  local selection=""
   command -v omarchy >/dev/null 2>&1 || { echo 'The Omarchy command is unavailable.' >&2; return 1; }
   case "$1" in
-    theme) exec omarchy menu summon style.theme ;;
-    background) exec omarchy menu summon style.background ;;
+    theme)
+      command -v omarchy-theme-switcher >/dev/null 2>&1 || { echo 'The Omarchy theme picker is unavailable.' >&2; return 1; }
+      command -v omarchy-theme-set >/dev/null 2>&1 || { echo 'The Omarchy theme setter is unavailable.' >&2; return 1; }
+      selection="$(omarchy-theme-switcher)" || selection=""
+      [[ -z $selection ]] || omarchy-theme-set "$selection"
+      ;;
+    background)
+      command -v omarchy-theme-bg-switcher >/dev/null 2>&1 || { echo 'The Omarchy background picker is unavailable.' >&2; return 1; }
+      command -v omarchy-theme-bg-set >/dev/null 2>&1 || { echo 'The Omarchy background setter is unavailable.' >&2; return 1; }
+      selection="$(omarchy-theme-bg-switcher)" || selection=""
+      [[ -z $selection ]] || omarchy-theme-bg-set "$selection"
+      ;;
     font-install) exec omarchy menu summon install.style.font ;;
     display) exec omarchy shell omarchy.monitor show ;;
     *) echo "Unknown appearance handoff: $1" >&2; return 2 ;;

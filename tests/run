@@ -119,6 +119,28 @@ cat >"$TMP/bin/omarchy-shell" <<'EOF'
 [[ ${FIXTURE_SHELL_FAIL:-false} != true ]]
 EOF
 
+cat >"$TMP/bin/omarchy-theme-switcher" <<'EOF'
+#!/bin/bash
+printf '%s\n' 'Fixture Dawn'
+printf '%s\n' 'theme picker' >>"$FIXTURE_ACTION_LOG"
+EOF
+
+cat >"$TMP/bin/omarchy-theme-set" <<'EOF'
+#!/bin/bash
+printf 'theme set %s\n' "$1" >>"$FIXTURE_ACTION_LOG"
+EOF
+
+cat >"$TMP/bin/omarchy-theme-bg-switcher" <<'EOF'
+#!/bin/bash
+printf '%s\n' '/tmp/fixture-background.jpg'
+printf '%s\n' 'background picker' >>"$FIXTURE_ACTION_LOG"
+EOF
+
+cat >"$TMP/bin/omarchy-theme-bg-set" <<'EOF'
+#!/bin/bash
+printf 'background set %s\n' "$1" >>"$FIXTURE_ACTION_LOG"
+EOF
+
 cat >"$TMP/bin/wl-copy" <<'EOF'
 #!/bin/bash
 if [[ -n ${FIXTURE_CLIPBOARD:-} ]]; then
@@ -187,8 +209,10 @@ if "$ROOT/scripts/omapanel-backend" appearance handoff '../unsafe' >/dev/null 2>
 "$ROOT/scripts/omapanel-backend" appearance handoff background
 "$ROOT/scripts/omapanel-backend" appearance handoff font-install
 "$ROOT/scripts/omapanel-backend" appearance handoff display
-grep -Fx 'menu summon style.theme' "$FIXTURE_ACTION_LOG" >/dev/null || fail "theme picker handoff"
-grep -Fx 'menu summon style.background' "$FIXTURE_ACTION_LOG" >/dev/null || fail "background picker handoff"
+grep -Fx 'theme picker' "$FIXTURE_ACTION_LOG" >/dev/null || fail "theme picker handoff"
+grep -Fx 'theme set Fixture Dawn' "$FIXTURE_ACTION_LOG" >/dev/null || fail "theme setter handoff"
+grep -Fx 'background picker' "$FIXTURE_ACTION_LOG" >/dev/null || fail "background picker handoff"
+grep -Fx 'background set /tmp/fixture-background.jpg' "$FIXTURE_ACTION_LOG" >/dev/null || fail "background setter handoff"
 grep -Fx 'menu summon install.style.font' "$FIXTURE_ACTION_LOG" >/dev/null || fail "font install handoff"
 grep -Fx 'shell omarchy.monitor show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "display panel handoff"
 
