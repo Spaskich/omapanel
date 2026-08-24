@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 - Unreleased
+## 0.4.0 - 2026-08-24
 
 - Added a responsive Devices page for Display, Audio, Bluetooth, Network, and
   Input with the same keyboard/mouse cursor model as Programs and Doctor.
