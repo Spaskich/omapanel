@@ -953,7 +953,12 @@ Item {
                   clip: true
                   rightPadding: Style.space(18)
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
-                  QQC.ScrollBar.vertical: PersistentScrollBar { }
+                  QQC.ScrollBar.vertical: PersistentScrollBar {
+                    parent: overviewScroll
+                    anchors.top: overviewScroll.top
+                    anchors.right: overviewScroll.right
+                    anchors.bottom: overviewScroll.bottom
+                  }
 
                   Column {
                     width: overviewScroll.availableWidth
@@ -1115,7 +1120,12 @@ Item {
                   clip: true
                   rightPadding: Style.space(18)
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
-                  QQC.ScrollBar.vertical: PersistentScrollBar { }
+                  QQC.ScrollBar.vertical: PersistentScrollBar {
+                    parent: appearanceScroll
+                    anchors.top: appearanceScroll.top
+                    anchors.right: appearanceScroll.right
+                    anchors.bottom: appearanceScroll.bottom
+                  }
 
                   Column {
                     width: appearanceScroll.availableWidth
@@ -1552,6 +1562,10 @@ Item {
                         model: programModel
                         QQC.ScrollBar.vertical: PersistentScrollBar {
                           id: programScrollbar
+                          parent: programList
+                          anchors.top: programList.top
+                          anchors.right: programList.right
+                          anchors.bottom: programList.bottom
                         }
                         delegate: CursorSurface {
                           id: programDelegate
@@ -1766,6 +1780,10 @@ Item {
                         }
                         QQC.ScrollBar.vertical: PersistentScrollBar {
                           id: healthScrollbar
+                          parent: healthList
+                          anchors.top: healthList.top
+                          anchors.right: healthList.right
+                          anchors.bottom: healthList.bottom
                         }
                         delegate: CursorSurface {
                           id: healthDelegate
