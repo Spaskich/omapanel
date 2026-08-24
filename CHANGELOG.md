@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 - Unreleased
+## 0.3.0 - 2026-08-24
 
 - Added a theme-native Appearance page and remapped navigation to Overview,
   Appearance, Programs, and Doctor.
