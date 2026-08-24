@@ -928,8 +928,12 @@ Item {
                 QQC.ScrollView {
                   id: overviewScroll
                   clip: true
+                  rightPadding: Style.space(18)
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
-                  QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AlwaysOn
+                  QQC.ScrollBar.vertical: QQC.ScrollBar {
+                    policy: QQC.ScrollBar.AlwaysOn
+                    active: true
+                  }
 
                   Column {
                     width: overviewScroll.availableWidth
@@ -1089,8 +1093,12 @@ Item {
                 QQC.ScrollView {
                   id: appearanceScroll
                   clip: true
+                  rightPadding: Style.space(18)
                   QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
-                  QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AlwaysOn
+                  QQC.ScrollBar.vertical: QQC.ScrollBar {
+                    policy: QQC.ScrollBar.AlwaysOn
+                    active: true
+                  }
 
                   Column {
                     width: appearanceScroll.availableWidth
@@ -1293,7 +1301,9 @@ Item {
                               root.requestAppearanceSetting("text-size", root.appearance.textSize.stops[index])
                             }
                           }
-                          WheelHandler {
+                          MouseArea {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.NoButton
                             onWheel: function(event) {
                               var distance = event.pixelDelta.y !== 0
                                 ? -event.pixelDelta.y
@@ -1523,7 +1533,11 @@ Item {
                         clip: true
                         spacing: Style.spacing.xs
                         model: programModel
-                        QQC.ScrollBar.vertical: QQC.ScrollBar { id: programScrollbar; policy: QQC.ScrollBar.AlwaysOn }
+                        QQC.ScrollBar.vertical: QQC.ScrollBar {
+                          id: programScrollbar
+                          policy: QQC.ScrollBar.AlwaysOn
+                          active: true
+                        }
                         delegate: CursorSurface {
                           id: programDelegate
                           required property int index
@@ -1735,7 +1749,11 @@ Item {
                             font.bold: true
                           }
                         }
-                        QQC.ScrollBar.vertical: QQC.ScrollBar { id: healthScrollbar; policy: QQC.ScrollBar.AlwaysOn }
+                        QQC.ScrollBar.vertical: QQC.ScrollBar {
+                          id: healthScrollbar
+                          policy: QQC.ScrollBar.AlwaysOn
+                          active: true
+                        }
                         delegate: CursorSurface {
                           id: healthDelegate
                           required property int index

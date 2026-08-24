@@ -9,6 +9,8 @@
 - Native theme/background pickers now return to the same Appearance position;
   text-size wheel changes are blocked, scrollbars stay visible, and every page
   uses the same panel height.
+- Persistent scrollbars use a reserved right-side gutter instead of covering
+  the page content.
 - Added installed-font selection, the Omarchy font installer handoff, and
   global text-size stops shared with Quattro's Display panel.
 - Added basic bar visibility, position, and transparency controls through
