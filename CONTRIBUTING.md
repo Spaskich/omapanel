@@ -16,6 +16,12 @@ New action adapters must include target validation, a dry-run specification,
 an impact explanation, fixture coverage, and an existing authoritative
 workflow. Tests must never execute destructive actions.
 
+New direct settings must call a canonical Omarchy command, validate values
+against current state or a fixed allowlist, return structured success, and
+offer a reversible previous value in the UI. A test fixture must prove both
+the accepted argv and rejection of unsupported input. Never infer state by
+calling a command whose default behavior toggles it.
+
 New Doctor checks must have a timeout, explicit unavailable/failure behavior,
 a privacy-reviewed report summary, and fixtures proving that one provider
 cannot discard other results. Never construct a shareable report from the

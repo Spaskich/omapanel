@@ -20,6 +20,26 @@ TestCase {
     compare(Model.filterPrograms(programs, "", "mise", true).length, 1)
   }
 
+  function test_appearance() {
+    var state = Model.normalizeAppearance({
+      schemaVersion: 1,
+      generatedAt: "now",
+      theme: { state: "ok", current: "Tokyo Night" },
+      background: { state: "ok", current: "Road", path: "/tmp/road.jpg" },
+      font: { state: "ok", current: "Mono", installed: ["Mono", "Other"] },
+      textSize: { state: "ok", currentPx: 13, stops: [9, 10, 12, 14, 16] },
+      bar: { state: "ok", visible: false, position: "left", transparent: true },
+      display: { state: "ok", focusedMonitor: "DP-1", scale: "1.25", brightnessAvailable: true, brightnessPercent: 40, count: 2, enabledCount: 1, focusedWidth: 2560, focusedHeight: 1440, displays: [] },
+      errors: []
+    })
+    verify(state !== null)
+    compare(Model.appearanceValue(state, "font"), "Mono")
+    compare(Model.appearanceValue(state, "bar-visible"), false)
+    compare(Model.textSizeIndex(state.textSize.stops, state.textSize.currentPx), 2)
+    compare(Model.displaySummary(state.display), "1 active display · DP-1 · 2560×1440 · 1.25×")
+    compare(Model.normalizeAppearance({schemaVersion: 2}), null)
+  }
+
   function test_doctor_filtering() {
     var checks = [
       { category: "Omarchy", status: "ok" },

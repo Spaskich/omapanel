@@ -48,6 +48,23 @@ if [[ ${1:-} == plugin && ${2:-} == list ]]; then
 elif [[ ${1:-} == version && ${2:-} == channel ]]; then echo stable
 elif [[ ${1:-} == version && ${2:-} == pkgs ]]; then echo today
 elif [[ ${1:-} == version ]]; then echo 4.0.0-test
+elif [[ ${1:-} == theme && ${2:-} == current ]]; then echo 'Fixture Night'
+elif [[ ${1:-} == theme && ${2:-} == bg && ${3:-} == current ]]; then echo 'Fixture Hills'
+elif [[ ${1:-} == font && ${2:-} == current ]]; then [[ ${FIXTURE_FONT_FAIL:-false} != true ]] && echo 'Fixture Mono'
+elif [[ ${1:-} == font && ${2:-} == list ]]; then [[ ${FIXTURE_FONT_FAIL:-false} != true ]] && printf '%s\n' 'Fixture Mono' 'Second Mono'
+elif [[ ${1:-} == font && ${2:-} == set ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
+elif [[ ${1:-} == display && ${2:-} == text && ${3:-} == size && $# == 3 ]]; then
+  printf '%s\n' 'text size: 12 px' 'gtk text-scaling-factor: 1.0' 'terminal font: 9 pt'
+elif [[ ${1:-} == display && ${2:-} == text && ${3:-} == size ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
+elif [[ ${1:-} == bar && ${2:-} =~ ^(position|transparent)$ ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
+elif [[ ${1:-} == toggle && ${2:-} == bar && ${3:-} == toggle ]]; then
+  flag="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/bar-off"
+  mkdir -p "$(dirname "$flag")"
+  if [[ -e $flag ]]; then rm -f "$flag"; else touch "$flag"; fi
+  printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
+elif [[ ${1:-} == monitor && ${2:-} == state ]]; then
+  printf '%s\n' 42 eDP-1 HDMI-A-1 eDP-1 '' eDP-1 1.25 '[{"name":"eDP-1","enabled":true,"focused":true,"width":1920,"height":1080},{"name":"HDMI-A-1","enabled":false,"focused":false,"width":2560,"height":1440}]'
+elif [[ ${1:-} == menu || ${1:-} == shell ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
 else exit 0
 fi
 EOF
@@ -114,8 +131,18 @@ chmod +x "$TMP/bin"/*
 
 export PATH="$TMP/bin:/usr/bin:/bin"
 export HOME="$TMP/home"
+export XDG_CONFIG_HOME="$TMP/home/.config"
 export XDG_DATA_HOME="$TMP/home/.local/share"
 export XDG_DATA_DIRS="$TMP/system/share"
+export XDG_STATE_HOME="$TMP/home/.local/state"
+export FIXTURE_ACTION_LOG="$TMP/appearance-actions"
+
+mkdir -p "$HOME/.config/omarchy" "$XDG_STATE_HOME/omarchy/current/theme/backgrounds"
+cat >"$HOME/.config/omarchy/shell.json" <<'EOF'
+{"version":1,"bar":{"position":"bottom","transparent":true,"layout":{"left":[],"center":[],"right":[]}},"plugins":[]}
+EOF
+touch "$XDG_STATE_HOME/omarchy/current/theme/backgrounds/0-fixture-hills.jpg"
+ln -s "$XDG_STATE_HOME/omarchy/current/theme/backgrounds/0-fixture-hills.jpg" "$XDG_STATE_HOME/omarchy/current/background"
 
 programs="$("$ROOT/scripts/omapanel-backend" collect programs)"
 jq -e '.schemaVersion == 1 and (.programs | length) == 10' <<<"$programs" >/dev/null || fail "unexpected program count"
@@ -130,6 +157,40 @@ jq -e '.providers.mise == "ok" and (.errors | length) == 0' <<<"$programs" >/dev
 
 programs_without_mise="$(FIXTURE_MISE_FAIL=true "$ROOT/scripts/omapanel-backend" collect programs)"
 jq -e '.providers.mise == "error" and (.errors[] | select(.provider == "mise")) and ([.programs[] | select(.kind == "mise")] | length == 0) and ([.programs[] | select(.kind == "app")] | length > 0)' <<<"$programs_without_mise" >/dev/null || fail "Mise provider failure isolation"
+
+appearance="$("$ROOT/scripts/omapanel-backend" collect appearance)"
+jq -e '.schemaVersion == 1 and .theme.current == "Fixture Night" and .background.current == "Fixture Hills" and (.background.path | endswith("0-fixture-hills.jpg"))' <<<"$appearance" >/dev/null || fail "appearance style state"
+jq -e '.font.current == "Fixture Mono" and .font.installed == ["Fixture Mono","Second Mono"] and .textSize.currentPx == 12' <<<"$appearance" >/dev/null || fail "appearance typography state"
+jq -e '.bar == {state:"ok",visible:true,position:"bottom",transparent:true}' <<<"$appearance" >/dev/null || fail "appearance bar state"
+jq -e '.display.state == "ok" and .display.focusedMonitor == "eDP-1" and .display.scale == "1.25" and .display.brightnessPercent == 42 and .display.count == 2 and .display.enabledCount == 1 and .display.focusedWidth == 1920' <<<"$appearance" >/dev/null || fail "appearance display state"
+
+appearance_without_fonts="$(FIXTURE_FONT_FAIL=true "$ROOT/scripts/omapanel-backend" collect appearance)"
+jq -e '.font.state == "unavailable" and (.errors[] | select(.provider == "font")) and .theme.state == "ok" and .display.state == "ok"' <<<"$appearance_without_fonts" >/dev/null || fail "appearance provider failure isolation"
+
+font_result="$("$ROOT/scripts/omapanel-backend" appearance set font 'Second Mono')"
+jq -e '.ok and .setting == "font" and .value == "Second Mono"' <<<"$font_result" >/dev/null || fail "font setting result"
+grep -Fx 'font set Second Mono' "$FIXTURE_ACTION_LOG" >/dev/null || fail "font setting handoff"
+if "$ROOT/scripts/omapanel-backend" appearance set font 'Missing Mono' >/dev/null 2>&1; then fail "unknown font accepted"; fi
+if "$ROOT/scripts/omapanel-backend" appearance set text-size 13 >/dev/null 2>&1; then fail "unsupported text size accepted"; fi
+if "$ROOT/scripts/omapanel-backend" appearance set bar-position diagonal >/dev/null 2>&1; then fail "unsupported bar position accepted"; fi
+if "$ROOT/scripts/omapanel-backend" appearance handoff '../unsafe' >/dev/null 2>&1; then fail "unknown appearance handoff accepted"; fi
+"$ROOT/scripts/omapanel-backend" appearance set text-size 14 >/dev/null
+"$ROOT/scripts/omapanel-backend" appearance set bar-position left >/dev/null
+"$ROOT/scripts/omapanel-backend" appearance set bar-transparency false >/dev/null
+"$ROOT/scripts/omapanel-backend" appearance set bar-visible false >/dev/null
+[[ -e $XDG_STATE_HOME/omarchy/toggles/bar-off ]] || fail "bar was not hidden"
+"$ROOT/scripts/omapanel-backend" appearance set bar-visible false >/dev/null
+[[ $(grep -c '^toggle bar toggle$' "$FIXTURE_ACTION_LOG") == 1 ]] || fail "bar desired state toggled twice"
+"$ROOT/scripts/omapanel-backend" appearance set bar-visible true >/dev/null
+[[ ! -e $XDG_STATE_HOME/omarchy/toggles/bar-off ]] || fail "bar was not shown"
+"$ROOT/scripts/omapanel-backend" appearance handoff theme
+"$ROOT/scripts/omapanel-backend" appearance handoff background
+"$ROOT/scripts/omapanel-backend" appearance handoff font-install
+"$ROOT/scripts/omapanel-backend" appearance handoff display
+grep -Fx 'menu summon style.theme' "$FIXTURE_ACTION_LOG" >/dev/null || fail "theme picker handoff"
+grep -Fx 'menu summon style.background' "$FIXTURE_ACTION_LOG" >/dev/null || fail "background picker handoff"
+grep -Fx 'menu summon install.style.font' "$FIXTURE_ACTION_LOG" >/dev/null || fail "font install handoff"
+grep -Fx 'shell omarchy.monitor show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "display panel handoff"
 
 doctor="$("$ROOT/scripts/omapanel-backend" collect doctor)"
 jq -e '.schemaVersion == 2 and (.checks | length) == 11 and .overall.counts.total == 11' <<<"$doctor" >/dev/null || fail "Doctor schema"
@@ -214,7 +275,7 @@ OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" >/dev/nu
 [[ $(grep -c '^o.bind("SUPER + I"' "$config/hypr/bindings.lua") == 1 ]] || fail "binding setup is not idempotent"
 grep -q 'https://example.test/a//b' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "JSONC string changed"
 [[ -L $HOME/.local/bin/omapanel && $(readlink -f "$HOME/.local/bin/omapanel") == "$ROOT/bin/omapanel" ]] || fail "CLI link setup"
-[[ $("$HOME/.local/bin/omapanel" --version) == 0.2.0 ]] || fail "linked CLI execution"
+[[ $("$HOME/.local/bin/omapanel" --version) == 0.3.0 ]] || fail "linked CLI execution"
 OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" --remove >/dev/null
 ! grep -q 'setup.omapanel' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "menu removal failed"
 ! grep -q '^o.bind("SUPER + I"' "$config/hypr/bindings.lua" || fail "binding removal failed"

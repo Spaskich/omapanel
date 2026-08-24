@@ -21,6 +21,11 @@ backend collect programs ─ owners ┘
 backend collect doctor ── isolated checks ── severity model ── Doctor cards
                          └─ privacy projection ── human / JSON / copy / file
 
+backend collect appearance ── capability snapshot ── Appearance controls
+selected setting ── exact validation ── canonical Omarchy command ── refresh
+                                  └─ previous value ── time-bounded UI undo
+picker/display request ── allowlisted handoff ── existing Quattro surface
+
 selected action ── dry-run validation ── confirmation ── validated adapter
                                                     └─ existing Omarchy workflow
 ```
@@ -54,6 +59,9 @@ scripts/omapanel-backend collect programs
 scripts/omapanel-backend collect programs --jsonl
 scripts/omapanel-backend collect doctor
 scripts/omapanel-backend collect health
+scripts/omapanel-backend collect appearance
+scripts/omapanel-backend appearance set <setting> <value>
+scripts/omapanel-backend appearance handoff <target>
 scripts/omapanel-backend doctor [--json] [--copy | --output <path>]
 scripts/omapanel-backend action --dry-run <adapter> <target>
 scripts/omapanel-backend action <adapter> <target>
@@ -72,6 +80,14 @@ update/restart review, restart shell, user/system journal, Hyprland editor,
 snapshot create/restore, orphan review, and sanitized report copy. Doctor only
 offers adapters that open a reviewable handoff; it does not expose immediate
 treatment as a diagnostic action.
+
+Appearance has a separate internal contract because font, text-size, and basic
+bar choices are direct settings rather than destructive workflow handoffs.
+The backend accepts only installed font families, curated text-size stops,
+fixed bar values, and fixed handoff names. It always invokes argv arrays. The
+UI serializes writes, refreshes state after completion, and retains one prior
+value for eight seconds. Theme/background selection, font installation, and
+display changes remain owned by Omarchy's existing pickers and panels.
 
 ## Terminal and report boundary
 
@@ -92,8 +108,8 @@ write that cursor; row rendering never maintains an independent hover
 highlight. Wide screens show list and details together. Narrow screens switch
 between them while preserving the cursor and use Backspace/Esc to return.
 
-Escape precedence is deterministic: confirmation, search text, detail view,
-then panel. Theme properties bind directly to `Color.menu`, `Color.popups`,
+Escape precedence is deterministic: open selector, confirmation, search text,
+detail view, then panel. Theme properties bind directly to `Color.menu`, `Color.popups`,
 `Color.accent`, `Color.urgent`, `Color.muted`, and `Style`, so an active theme
 change reevaluates the existing surface.
 

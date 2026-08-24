@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.2.0 - Unreleased
+## 0.3.0 - Unreleased
+
+- Added a theme-native Appearance page and remapped navigation to Overview,
+  Appearance, Programs, and Doctor.
+- Added current theme and background state with handoffs to Omarchy's native
+  pickers instead of duplicating them.
+- Added installed-font selection, the Omarchy font installer handoff, and
+  global text-size stops shared with Quattro's Display panel.
+- Added basic bar visibility, position, and transparency controls through
+  canonical Omarchy commands.
+- Added a read-only monitor summary and direct handoff to Quattro's existing
+  Display panel; advanced monitor configuration remains deferred.
+- Added one-level, eight-second undo for direct Appearance settings, strict
+  input validation, partial provider states, and isolated fixtures.
+
+## 0.2.0 - 2026-08-24
 
 - Replaced Health & Recovery with a dedicated, grouped Doctor experience.
 - Added the shell-independent `omapanel doctor` CLI with human, JSON,

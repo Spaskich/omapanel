@@ -1,18 +1,22 @@
 # OmaPanel
 
 **The Omarchy Control Center.** OmaPanel is a keyboard-first, mouse-complete
-Quattro panel for understanding installed software, checking system health,
-and reaching the correct Omarchy workflow when something needs to change.
+Quattro panel for appearance, installed software, system health, and reaching
+the correct Omarchy workflow when something needs to change.
 
 OmaPanel is intentionally a map, not a second package manager. It collects
-state without privilege, explains ownership and impact, previews every action,
-then delegates to Pacman, Flatpak, Snapper, systemd, or the existing Omarchy
-command that already owns the operation.
+state without privilege, explains ownership and impact, and delegates changes
+to the existing Omarchy command or workflow that already owns the operation.
 
 ## Features
 
-- Responsive Overview, Programs, and Doctor pages.
+- Responsive Overview, Appearance, Programs, and Doctor pages.
 - Live Omarchy theme, type-scale, spacing, focus, and surface colors.
+- Current theme and background preview with native Omarchy picker handoffs.
+- Installed-font selection, global text-size controls, and one-level undo.
+- Bar visibility, position, and transparency through canonical Omarchy
+  commands.
+- Read-only display summary with a handoff to Quattro's Display panel.
 - Applications, web apps, TUI launchers, plugins, Flatpaks, local launchers,
   and an opt-in advanced Pacman/AUR package list.
 - Package/launcher ownership and protected first-party components.
@@ -112,7 +116,10 @@ useful for diagnosis.
 
 | Keys | Action |
 |---|---|
-| `Alt+1/2/3` | Overview / Programs / Health |
+| `Alt+1/2/3/4` | Overview / Appearance / Programs / Doctor |
+| `Tab` / `Shift+Tab` | Move through Appearance controls |
+| `Ctrl+Z` | Undo the latest direct Appearance change while offered |
+| `Page Up/Down`, `Home/End` | Scroll the Appearance page |
 | `↑` `↓` or `j` `k` | Move through rows |
 | `Ctrl+N` / `Ctrl+P` | Next / previous row |
 | `←` `→` or `h` `l` | Move between pages |
@@ -140,6 +147,11 @@ right-click.
   restores anything.
 - Doctor handoffs only open allowlisted, existing workflows after an explicit
   preview; treatment remains owned by the system tool.
+- Appearance writes use narrowly validated Omarchy commands. Theme,
+  background, font installation, and display management stay in their native
+  pickers or panels.
+- Direct font, text-size, and basic bar changes offer an eight-second undo and
+  never edit Omarchy configuration themselves.
 - Mise versions are visibility-only because `mise uninstall` does not update
   the configuration files that requested a tool.
 
@@ -154,8 +166,9 @@ qmllint -I /usr/share/omarchy/shell OmaPanel.qml
 ./tests/run
 ```
 
-All action tests use `--dry-run`; the suite never uninstalls or repairs
-anything. See [Architecture](docs/ARCHITECTURE.md) and
+Tests replace Omarchy commands with isolated fixtures; the suite never changes
+the real desktop, uninstalls software, or repairs anything. See
+[Architecture](docs/ARCHITECTURE.md) and
 [Roadmap](docs/ROADMAP.md) for the contracts and upstream direction.
 
 ## Status

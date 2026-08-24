@@ -24,14 +24,19 @@
 
 ## v0.3 — Appearance
 
-- Current theme/background previews, theme switching, font scaling, and bar
-  configuration.
-- Delegate to Omarchy's theme, font, background, and bar commands; do not
-  create a second theme engine.
+- Show the current theme/background and hand selection to Omarchy's native
+  pickers rather than creating a second theme engine.
+- Select installed fonts, hand font installation to the Omarchy menu, and use
+  the canonical global text-size control.
+- Manage basic bar visibility, position, and transparency with single-level
+  undo.
+- Summarize current displays and open Quattro's Display panel for brightness,
+  scaling, and monitor toggles.
 
 ## v0.4 — Devices
 
-- Displays and per-device keyboard, mouse, and touchpad settings.
+- Resolution, refresh rate, arrangement, persistent monitor profiles, and
+  per-device keyboard, mouse, and touchpad settings.
 - Audio, Bluetooth, and network summaries using Quattro's existing services.
 - Any editable configuration must be transactional: backup, validate, apply,
   and offer rollback.

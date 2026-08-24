@@ -4,6 +4,99 @@ function normalized(value) {
   return String(value || "").toLowerCase().trim()
 }
 
+function emptyAppearance() {
+  return {
+    generatedAt: "",
+    theme: { state: "unavailable", current: "Unknown" },
+    background: { state: "unavailable", current: "Unknown", path: "" },
+    font: { state: "unavailable", current: "Unknown", installed: [] },
+    textSize: { state: "unavailable", currentPx: 0, stops: [9, 10, 11, 12, 14, 16, 20] },
+    bar: { state: "unavailable", visible: true, position: "top", transparent: false },
+    display: {
+      state: "unavailable", focusedMonitor: "", scale: "", brightnessAvailable: false,
+      brightnessPercent: 0, count: 0, enabledCount: 0, focusedWidth: 0, focusedHeight: 0, displays: []
+    },
+    errors: []
+  }
+}
+
+function normalizeAppearance(payload) {
+  if (!payload || Number(payload.schemaVersion) !== 1) return null
+  var base = emptyAppearance()
+  var theme = payload.theme || {}
+  var background = payload.background || {}
+  var font = payload.font || {}
+  var textSize = payload.textSize || {}
+  var bar = payload.bar || {}
+  var display = payload.display || {}
+
+  base.generatedAt = String(payload.generatedAt || "")
+  base.theme = { state: String(theme.state || "unavailable"), current: String(theme.current || "Unknown") }
+  base.background = {
+    state: String(background.state || "unavailable"), current: String(background.current || "Unknown"),
+    path: String(background.path || "")
+  }
+  base.font = {
+    state: String(font.state || "unavailable"), current: String(font.current || "Unknown"),
+    installed: Array.isArray(font.installed) ? font.installed.map(function(value) { return String(value) }) : []
+  }
+  base.textSize = {
+    state: String(textSize.state || "unavailable"), currentPx: Number(textSize.currentPx) || 0,
+    stops: Array.isArray(textSize.stops) && textSize.stops.length > 0
+      ? textSize.stops.map(function(value) { return Number(value) }) : base.textSize.stops
+  }
+  base.bar = {
+    state: String(bar.state || "unavailable"), visible: bar.visible !== false,
+    position: String(bar.position || "top"), transparent: bar.transparent === true
+  }
+  base.display = {
+    state: String(display.state || "unavailable"), focusedMonitor: String(display.focusedMonitor || ""),
+    scale: String(display.scale || ""), brightnessAvailable: display.brightnessAvailable === true,
+    brightnessPercent: Number(display.brightnessPercent) || 0, count: Number(display.count) || 0,
+    enabledCount: Number(display.enabledCount) || 0, focusedWidth: Number(display.focusedWidth) || 0,
+    focusedHeight: Number(display.focusedHeight) || 0,
+    displays: Array.isArray(display.displays) ? display.displays : []
+  }
+  base.errors = Array.isArray(payload.errors) ? payload.errors : []
+  return base
+}
+
+function appearanceValue(appearance, setting) {
+  var state = appearance || emptyAppearance()
+  switch (String(setting || "")) {
+    case "font": return state.font.current
+    case "text-size": return state.textSize.currentPx
+    case "bar-position": return state.bar.position
+    case "bar-transparency": return state.bar.transparent
+    case "bar-visible": return state.bar.visible
+    default: return null
+  }
+}
+
+function textSizeIndex(stops, current) {
+  var values = Array.isArray(stops) && stops.length > 0 ? stops : [9, 10, 11, 12, 14, 16, 20]
+  var target = Number(current)
+  var best = 0
+  var distance = Infinity
+  for (var i = 0; i < values.length; i++) {
+    var nextDistance = Math.abs(Number(values[i]) - target)
+    if (nextDistance < distance) { best = i; distance = nextDistance }
+  }
+  return best
+}
+
+function displaySummary(display) {
+  var state = display || {}
+  if (state.state !== "ok") return "Display controls unavailable"
+  var count = Number(state.enabledCount) || 0
+  var output = count + " active display" + (count === 1 ? "" : "s")
+  if (state.focusedMonitor) output += " · " + state.focusedMonitor
+  if (Number(state.focusedWidth) > 0 && Number(state.focusedHeight) > 0)
+    output += " · " + state.focusedWidth + "×" + state.focusedHeight
+  if (state.scale) output += " · " + state.scale + "×"
+  return output
+}
+
 function filterPrograms(programs, query, filter, showAdvanced) {
   var source = Array.isArray(programs) ? programs : []
   var needle = normalized(query)

@@ -15,7 +15,7 @@ Item {
   property var manifest: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "spaskich.omapanel"
-  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.2.0"
+  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.3.0"
   readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string backendPath: sourceDir + "/scripts/omapanel-backend"
   readonly property var appLibrary: shell ? shell.appLibrary : null
@@ -27,6 +27,7 @@ Item {
 
   property var programsRaw: []
   property var healthRaw: []
+  property var appearance: Model.emptyAppearance()
   property var appMetadata: ({})
   property string programQuery: ""
   property string programFilter: "all"
@@ -39,11 +40,25 @@ Item {
 
   property bool programsLoading: false
   property bool healthLoading: false
+  property bool appearanceLoading: false
+  property bool appearanceBusy: false
   property string programsError: ""
   property string healthError: ""
   property string programOutput: ""
   property string healthOutput: ""
   property string doctorGeneratedAt: ""
+  property string appearanceOutput: ""
+  property string appearanceError: ""
+  property string pendingAppearanceSetting: ""
+  property string pendingAppearanceValue: ""
+  property var pendingAppearancePrevious: null
+  property bool pendingAppearanceIsUndo: false
+  property string appearanceActionOutput: ""
+  property string pendingHandoff: ""
+  property string handoffOutput: ""
+  property bool undoAvailable: false
+  property string undoSetting: ""
+  property var undoValue: null
 
   property bool confirmOpen: false
   property var pendingPreview: ({})
@@ -107,17 +122,106 @@ Item {
   }
 
   function setPage(index) {
-    pageIndex = Math.max(0, Math.min(2, index))
+    pageIndex = Math.max(0, Math.min(3, index))
     detailOpen = false
     cursorActive = true
-    if (pageIndex === 1 && programsRaw.length === 0 && !programsLoading) refreshPrograms()
-    if (pageIndex === 2 && healthRaw.length === 0 && !healthLoading) refreshHealth()
+    if (pageIndex === 1 && appearance.generatedAt === "" && !appearanceLoading) refreshAppearance()
+    if (pageIndex === 2 && programsRaw.length === 0 && !programsLoading) refreshPrograms()
+    if (pageIndex === 3 && healthRaw.length === 0 && !healthLoading) refreshHealth()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
   function refreshAll() {
+    refreshAppearance()
     refreshPrograms()
     refreshHealth()
+  }
+
+  function refreshAppearance() {
+    if (appearanceProc.running || backendPath === "") return
+    appearanceLoading = true
+    appearanceError = ""
+    appearanceOutput = ""
+    appearanceProc.running = true
+  }
+
+  function applyAppearance(raw) {
+    try {
+      var parsed = JSON.parse(String(raw || ""))
+      var normalized = Model.normalizeAppearance(parsed)
+      if (!normalized) throw new Error("Unsupported appearance response")
+      appearance = normalized
+      appearanceError = ""
+    } catch (e) {
+      appearanceError = "Appearance could not be read: " + e
+    }
+  }
+
+  function requestAppearanceSetting(setting, value) {
+    if (appearanceBusy || appearanceLoading) return
+    var previous = Model.appearanceValue(appearance, setting)
+    var requested = value
+    if (String(previous) === String(requested)) return
+    pendingAppearanceSetting = String(setting)
+    pendingAppearanceValue = String(requested)
+    pendingAppearancePrevious = previous
+    pendingAppearanceIsUndo = false
+    appearanceActionOutput = ""
+    appearanceBusy = true
+    appearanceSetProc.running = true
+  }
+
+  function requestTextSizeDelta(delta) {
+    if (appearance.textSize.state !== "ok") return
+    var index = Model.textSizeIndex(appearance.textSize.stops, appearance.textSize.currentPx)
+    var next = Math.max(0, Math.min(appearance.textSize.stops.length - 1, index + delta))
+    requestAppearanceSetting("text-size", appearance.textSize.stops[next])
+  }
+
+  function scrollAppearance(delta, absoluteEnd) {
+    var flick = appearanceScroll.contentItem
+    if (!flick || flick.contentY === undefined) return
+    var maximum = Math.max(0, flick.contentHeight - flick.height)
+    if (absoluteEnd === true) flick.contentY = maximum
+    else if (absoluteEnd === false) flick.contentY = 0
+    else flick.contentY = Math.max(0, Math.min(maximum, flick.contentY + delta))
+  }
+
+  function runUndo() {
+    if (!undoAvailable || appearanceBusy || undoValue === null || undoValue === undefined) return
+    pendingAppearanceSetting = undoSetting
+    pendingAppearanceValue = String(undoValue)
+    pendingAppearancePrevious = null
+    pendingAppearanceIsUndo = true
+    appearanceActionOutput = ""
+    undoAvailable = false
+    undoTimer.stop()
+    appearanceBusy = true
+    appearanceSetProc.running = true
+  }
+
+  function showUndoToast(message, setting, previous) {
+    toastTimer.stop()
+    toastMessage = String(message || "Setting changed.")
+    undoSetting = String(setting)
+    undoValue = previous
+    undoAvailable = true
+    undoTimer.restart()
+  }
+
+  function clearUndo() {
+    undoAvailable = false
+    undoSetting = ""
+    undoValue = null
+    undoTimer.stop()
+    toastMessage = ""
+  }
+
+  function requestAppearanceHandoff(kind) {
+    if (handoffProc.running || appearanceBusy) return
+    pendingHandoff = String(kind)
+    handoffOutput = ""
+    handoffProc.running = true
   }
 
   function refreshPrograms() {
@@ -234,11 +338,11 @@ Item {
 
   function selectRelative(delta) {
     cursorActive = true
-    if (pageIndex === 1 && programModel.count > 0) {
+    if (pageIndex === 2 && programModel.count > 0) {
       selectedProgramIndex = Model.wrapIndex(selectedProgramIndex, delta, programModel.count)
       programRevision++
       programList.positionViewAtIndex(selectedProgramIndex, ListView.Contain)
-    } else if (pageIndex === 2 && healthModel.count > 0) {
+    } else if (pageIndex === 3 && healthModel.count > 0) {
       selectedHealthIndex = Model.wrapIndex(selectedHealthIndex, delta, healthModel.count)
       healthRevision++
       healthList.positionViewAtIndex(selectedHealthIndex, ListView.Contain)
@@ -246,14 +350,14 @@ Item {
   }
 
   function activateSelected() {
-    if (pageIndex === 1 && selectedProgramRow) detailOpen = true
-    else if (pageIndex === 2 && selectedHealthRow) detailOpen = true
+    if (pageIndex === 2 && selectedProgramRow) detailOpen = true
+    else if (pageIndex === 3 && selectedHealthRow) detailOpen = true
   }
 
   function requestSelectedAction() {
-    if (pageIndex === 1 && selectedProgramRow && selectedProgramRow.actionAdapter)
+    if (pageIndex === 2 && selectedProgramRow && selectedProgramRow.actionAdapter)
       requestAction(selectedProgramRow.actionAdapter, selectedProgramRow.actionTarget)
-    else if (pageIndex === 2 && selectedHealthRow && selectedHealthRow.actionAdapter)
+    else if (pageIndex === 3 && selectedHealthRow && selectedHealthRow.actionAdapter)
       requestAction(selectedHealthRow.actionAdapter, selectedHealthRow.actionTarget)
   }
 
@@ -287,6 +391,8 @@ Item {
   }
 
   function showToast(message) {
+    undoAvailable = false
+    undoTimer.stop()
     toastMessage = String(message || "")
     toastTimer.restart()
   }
@@ -431,6 +537,62 @@ Item {
   }
 
   Process {
+    id: appearanceProc
+    command: [root.backendPath, "collect", "appearance"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.appearanceOutput = text
+        if (text) root.applyAppearance(text)
+      }
+    }
+    stderr: StdioCollector { id: appearanceStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.appearanceLoading = false
+      if (exitCode !== 0 && root.appearanceOutput === "")
+        root.appearanceError = String(appearanceStderr.text || "Appearance could not be refreshed.").trim()
+    }
+  }
+
+  Process {
+    id: appearanceSetProc
+    command: [root.backendPath, "appearance", "set", root.pendingAppearanceSetting, root.pendingAppearanceValue]
+    stdout: StdioCollector {
+      id: appearanceSetStdout
+      waitForEnd: true
+      onStreamFinished: root.appearanceActionOutput = text
+    }
+    stderr: StdioCollector { id: appearanceSetStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.appearanceBusy = false
+      if (exitCode === 0) {
+        var message = root.pendingAppearanceIsUndo ? "Change undone." : "Setting changed."
+        try {
+          var result = JSON.parse(String(root.appearanceActionOutput || appearanceSetStdout.text || ""))
+          if (!root.pendingAppearanceIsUndo && result.message) message = result.message
+        } catch (e) { }
+        if (root.pendingAppearanceIsUndo) root.showToast(message)
+        else root.showUndoToast(message, root.pendingAppearanceSetting, root.pendingAppearancePrevious)
+        root.refreshAppearance()
+      } else {
+        root.showToast(String(appearanceSetStderr.text || "The appearance setting could not be changed.").trim())
+        root.refreshAppearance()
+      }
+    }
+  }
+
+  Process {
+    id: handoffProc
+    command: [root.backendPath, "appearance", "handoff", root.pendingHandoff]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handoffOutput = text }
+    stderr: StdioCollector { id: handoffStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.requestClose()
+      else root.showToast(String(handoffStderr.text || "The Omarchy workflow could not be opened.").trim())
+    }
+  }
+
+  Process {
     id: previewProc
     command: [root.backendPath, "action", "--dry-run", root.pendingAdapter, root.pendingTarget]
     stdout: StdioCollector {
@@ -463,8 +625,8 @@ Item {
             if (result.message) message = result.message
           } catch (e) { }
           root.showToast(message)
-          if (root.pageIndex === 1) refreshDelay.restart()
-          else if (root.pageIndex === 2) root.refreshHealth()
+          if (root.pageIndex === 2) refreshDelay.restart()
+          else if (root.pageIndex === 3) root.refreshHealth()
         }
       } else {
         root.showToast(String(actionStderr.text || "The workflow could not be started.").trim())
@@ -475,6 +637,7 @@ Item {
   Timer { id: refreshDelay; interval: 700; onTriggered: root.refreshPrograms() }
   Timer { id: programRebuildDelay; interval: 80; onTriggered: root.rebuildPrograms() }
   Timer { id: toastTimer; interval: 4000; onTriggered: root.toastMessage = "" }
+  Timer { id: undoTimer; interval: 8000; onTriggered: root.clearUndo() }
 
   PanelWindow {
     id: panel
@@ -516,9 +679,34 @@ Item {
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
+          var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
+          var alt = (event.modifiers & Qt.AltModifier) !== 0
+
           if (root.confirmOpen) {
             if (confirmDialog.handleKey(event)) event.accepted = true
             return
+          }
+
+          if (root.pageIndex === 1 && fontDropdown.popupOpen) return
+
+          if (ctrl && event.key === Qt.Key_Z && root.undoAvailable) {
+            root.runUndo(); event.accepted = true; return
+          }
+
+          if (root.pageIndex === 1 && event.key === Qt.Key_PageDown) {
+            root.scrollAppearance(Style.space(360)); event.accepted = true; return
+          } else if (root.pageIndex === 1 && event.key === Qt.Key_PageUp) {
+            root.scrollAppearance(-Style.space(360)); event.accepted = true; return
+          } else if (root.pageIndex === 1 && event.key === Qt.Key_End) {
+            root.scrollAppearance(0, true); event.accepted = true; return
+          } else if (root.pageIndex === 1 && event.key === Qt.Key_Home) {
+            root.scrollAppearance(0, false); event.accepted = true; return
+          } else if (root.pageIndex === 1 && keyCatcher.activeFocus
+                     && (event.key === Qt.Key_Down || event.text === "j")) {
+            root.scrollAppearance(Style.space(64)); event.accepted = true; return
+          } else if (root.pageIndex === 1 && keyCatcher.activeFocus
+                     && (event.key === Qt.Key_Up || event.text === "k")) {
+            root.scrollAppearance(-Style.space(64)); event.accepted = true; return
           }
 
           if (searchField.activeFocus) {
@@ -530,20 +718,21 @@ Item {
             return
           }
 
-          var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
-          var alt = (event.modifiers & Qt.AltModifier) !== 0
           if (event.key === Qt.Key_Escape) {
             root.goBackOrClose(); event.accepted = true
           } else if (ctrl && event.key === Qt.Key_K || event.text === "/") {
-            if (root.pageIndex !== 1) root.setPage(1)
+            if (root.pageIndex !== 2) root.setPage(2)
             searchField.forceActiveFocus(); searchField.selectAll(); event.accepted = true
           } else if (ctrl && event.key === Qt.Key_R) {
-            if (root.pageIndex === 1) root.refreshPrograms()
-            else if (root.pageIndex === 2) root.refreshHealth()
+            if (root.pageIndex === 1) root.refreshAppearance()
+            else if (root.pageIndex === 2) root.refreshPrograms()
+            else if (root.pageIndex === 3) root.refreshHealth()
             else root.refreshAll()
             event.accepted = true
-          } else if (alt && event.key >= Qt.Key_1 && event.key <= Qt.Key_3) {
+          } else if (alt && event.key >= Qt.Key_1 && event.key <= Qt.Key_4) {
             root.setPage(event.key - Qt.Key_1); event.accepted = true
+          } else if (root.pageIndex === 1 && !keyCatcher.activeFocus) {
+            return
           } else if (event.key === Qt.Key_Down || event.text === "j" || (ctrl && event.key === Qt.Key_N)) {
             root.selectRelative(1); event.accepted = true
           } else if (event.key === Qt.Key_Up || event.text === "k" || (ctrl && event.key === Qt.Key_P)) {
@@ -593,15 +782,15 @@ Item {
             }
 
             Text {
-              visible: root.programsLoading || root.healthLoading
-              text: root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Running Doctor"
+              visible: root.appearanceLoading || root.programsLoading || root.healthLoading
+              text: root.appearanceLoading ? "Reading appearance" : root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Running Doctor"
               color: root.mutedText
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
 
             Text {
-              visible: root.programsLoading || root.healthLoading
+              visible: root.appearanceLoading || root.programsLoading || root.healthLoading
               text: "󰑐"
               color: root.selectedText
               font.family: Style.font.family
@@ -654,8 +843,9 @@ Item {
               Repeater {
                 model: [
                   { label: "Overview", icon: "󰋜", hint: "Alt+1" },
-                  { label: "Programs", icon: "󰀻", hint: "Alt+2" },
-                  { label: "Doctor", icon: "󰒘", hint: "Alt+3" }
+                  { label: "Appearance", icon: "󰏘", hint: "Alt+2" },
+                  { label: "Programs", icon: "󰀻", hint: "Alt+3" },
+                  { label: "Doctor", icon: "󰒘", hint: "Alt+4" }
                 ]
                 delegate: Button {
                   required property int index
@@ -681,7 +871,7 @@ Item {
               }
               Text {
                 Layout.fillWidth: true
-                text: "↑↓ / j k   Navigate\n↵           Open details\nx           Preview action\n/           Search\nEsc         Back"
+                text: "Alt+1–4    Pages\nTab         Controls\n↑↓ / j k   Navigate\nCtrl+Z      Undo setting\nEsc         Back"
                 color: root.mutedText
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -707,7 +897,7 @@ Item {
                 Layout.fillWidth: true
                 spacing: Style.spacing.sm
                 Repeater {
-                  model: ["Overview", "Programs", "Doctor"]
+                  model: ["Overview", "Appearance", "Programs", "Doctor"]
                   delegate: Button {
                     required property int index
                     required property string modelData
@@ -799,11 +989,29 @@ Item {
                           anchors.fill: parent
                           anchors.margins: parent.contentLeftInset
                           spacing: Style.spacing.sm
+                          Text { text: "󰏘  APPEARANCE"; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                          Text { text: root.appearanceLoading && root.appearance.generatedAt === "" ? "Reading style…" : root.appearance.theme.current; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                          Text { width: parent.width; text: root.appearance.background.current + " · " + root.appearance.font.current; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; elide: Text.ElideRight }
+                          Item { width: 1; height: Style.spacing.xs }
+                          Button { text: "Open appearance"; iconText: "󰁔"; onClicked: root.setPage(1) }
+                        }
+                      }
+
+                      BorderSurface {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Style.space(150)
+                        color: Style.normalFillFor(root.foreground, Color.accent)
+                        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                        padding: Style.spacing.panelPadding
+                        Column {
+                          anchors.fill: parent
+                          anchors.margins: parent.contentLeftInset
+                          spacing: Style.spacing.sm
                           Text { text: "󰀻  PROGRAMS"; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
                           Text { text: root.programsLoading && root.counts.total === 0 ? "Scanning…" : root.counts.total + " visible items"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
                           Text { width: parent.width; text: root.counts.app + " apps · " + root.counts.webapp + " web · " + root.counts.plugin + " plugins · " + root.counts.tui + " TUIs"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
                           Item { width: 1; height: Style.spacing.xs }
-                          Button { text: "Browse programs"; iconText: "󰁔"; onClicked: root.setPage(1) }
+                          Button { text: "Browse programs"; iconText: "󰁔"; onClicked: root.setPage(2) }
                         }
                       }
 
@@ -821,7 +1029,7 @@ Item {
                           Text { text: root.healthLoading && root.healthRaw.length === 0 ? "Checking…" : root.overall.label; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
                           Text { width: parent.width; text: root.overall.count > 0 ? root.overall.count + " of " + root.healthRaw.length + " checks need attention" : root.healthRaw.length + " diagnostic checks completed"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
                           Item { width: 1; height: Style.spacing.xs }
-                          Button { text: "View Doctor"; iconText: "󰁔"; onClicked: root.setPage(2) }
+                          Button { text: "View Doctor"; iconText: "󰁔"; onClicked: root.setPage(3) }
                         }
                       }
                     }
@@ -862,6 +1070,330 @@ Item {
                       spacing: Style.spacing.md
                       Text { text: "󰌾"; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.icon }
                       Text { width: parent.width - Style.space(28); text: "Safe by default · collection is privilege-free, protected components stay protected, and changes require confirmation."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                    }
+                  }
+                }
+
+                // ---------------------------------------------- Appearance
+                QQC.ScrollView {
+                  id: appearanceScroll
+                  clip: true
+                  QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
+
+                  Column {
+                    width: appearanceScroll.availableWidth
+                    spacing: Style.space(14)
+
+                    Row {
+                      width: parent.width
+                      spacing: Style.spacing.md
+                      Column {
+                        width: parent.width - appearanceRefresh.width - parent.spacing
+                        spacing: Style.spacing.xs
+                        Text { text: "Appearance"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                        Text { width: parent.width; text: "See what is active, change stable settings here, and hand richer choices back to Omarchy."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                      }
+                      Button {
+                        id: appearanceRefresh
+                        iconText: "󰑐"
+                        iconSpinning: root.appearanceLoading
+                        tooltipText: "Refresh (Ctrl+R)"
+                        focusable: true
+                        onClicked: root.refreshAppearance()
+                      }
+                    }
+
+                    Text {
+                      visible: root.appearanceError !== "" || root.appearance.errors.length > 0
+                      width: parent.width
+                      text: root.appearanceError !== "" ? root.appearanceError
+                        : root.appearance.errors.length + " appearance provider" + (root.appearance.errors.length === 1 ? " is" : "s are") + " unavailable. Other controls still work."
+                      color: Color.urgent
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WordWrap
+                    }
+
+                    PanelSectionHeader { width: parent.width; text: "STYLE"; foreground: root.foreground; fontFamily: Style.font.family }
+
+                    BorderSurface {
+                      width: parent.width
+                      implicitHeight: Math.max(backgroundPreview.implicitHeight, styleDetails.implicitHeight) + Style.spacing.panelPadding * 2
+                      color: Style.normalFillFor(root.foreground, Color.accent)
+                      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                      padding: Style.spacing.panelPadding
+
+                      Row {
+                        anchors.fill: parent
+                        anchors.margins: parent.contentLeftInset
+                        spacing: Style.spacing.lg
+
+                        BorderSurface {
+                          id: backgroundPreview
+                          width: root.narrow ? Style.space(130) : Style.space(180)
+                          height: Style.space(112)
+                          color: Style.selectedFillFor(root.foreground, Color.accent)
+                          borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                          radius: Style.cornerRadius
+                          clip: true
+
+                          Image {
+                            anchors.fill: parent
+                            source: root.appearance.background.path === "" ? "" : "file://" + root.appearance.background.path
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            cache: false
+                          }
+                          Text {
+                            anchors.centerIn: parent
+                            visible: root.appearance.background.path === ""
+                            text: "󰋩"
+                            color: root.selectedText
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.displayLarge
+                          }
+                        }
+
+                        Column {
+                          id: styleDetails
+                          width: parent.width - backgroundPreview.width - parent.spacing
+                          spacing: Style.spacing.sm
+                          Text { text: root.appearance.theme.state === "ok" ? root.appearance.theme.current : "Theme unavailable"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                          Text { text: root.appearance.background.state === "ok" ? root.appearance.background.current : "Background unavailable"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight; width: parent.width }
+                          Text { text: "Selection stays in Omarchy’s native pickers."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; width: parent.width }
+                          Row {
+                            spacing: Style.spacing.sm
+                            Button { text: "Change theme"; iconText: "󰏘"; bordered: true; focusable: true; enabled: root.appearance.theme.state === "ok"; onClicked: root.requestAppearanceHandoff("theme") }
+                            Button { text: "Change background"; iconText: "󰋩"; bordered: true; focusable: true; enabled: root.appearance.background.state === "ok"; onClicked: root.requestAppearanceHandoff("background") }
+                          }
+                        }
+                      }
+                    }
+
+                    PanelSectionHeader { width: parent.width; text: "TYPOGRAPHY"; foreground: root.foreground; fontFamily: Style.font.family }
+
+                    BorderSurface {
+                      width: parent.width
+                      implicitHeight: typographyColumn.implicitHeight + Style.spacing.panelPadding * 2
+                      color: "transparent"
+                      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                      padding: Style.spacing.panelPadding
+
+                      Column {
+                        id: typographyColumn
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: parent.contentLeftInset
+                        spacing: Style.spacing.md
+
+                        Row {
+                          width: parent.width
+                          spacing: Style.spacing.md
+                          SearchableDropdown {
+                            id: fontDropdown
+                            width: parent.width - addFontButton.width - parent.spacing
+                            label: "INSTALLED FONT"
+                            value: root.appearance.font.current
+                            options: root.appearance.font.installed
+                            foreground: root.foreground
+                            background: Color.popups.background
+                            popupBorder: Color.popups.border
+                            fontFamily: Style.font.family
+                            enabled: root.appearance.font.state === "ok" && !root.appearanceBusy
+                            opacity: enabled ? 1 : 0.45
+                            onChanged: function(value) { root.requestAppearanceSetting("font", value) }
+                            Connections {
+                              target: root
+                              function onAppearanceChanged() { fontDropdown.value = root.appearance.font.current }
+                            }
+                          }
+                          Button {
+                            id: addFontButton
+                            anchors.bottom: parent.bottom
+                            text: "Add fonts"
+                            iconText: "󰛖"
+                            bordered: true
+                            focusable: true
+                            enabled: !root.appearanceBusy
+                            onClicked: root.requestAppearanceHandoff("font-install")
+                          }
+                        }
+
+                        BorderSurface {
+                          width: parent.width
+                          implicitHeight: fontSample.implicitHeight + Style.spacing.md * 2
+                          color: Style.normalFillFor(root.foreground, Color.accent)
+                          borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                          padding: Style.spacing.md
+                          Text {
+                            id: fontSample
+                            anchors.fill: parent
+                            anchors.margins: parent.contentLeftInset
+                            text: "The quick brown fox · 0123456789 · {}[]<>"
+                            color: root.foreground
+                            font.family: root.appearance.font.current === "Unknown" ? Style.font.family : root.appearance.font.current
+                            font.pixelSize: Style.font.body
+                            elide: Text.ElideRight
+                          }
+                        }
+
+                        Text {
+                          text: "TEXT SIZE  ·  " + (root.appearance.textSize.state === "ok" ? root.appearance.textSize.currentPx + "px" : "Unavailable")
+                          color: root.mutedText
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          font.bold: true
+                        }
+
+                        BorderSurface {
+                          id: textSizeControl
+                          width: parent.width
+                          height: Style.space(48)
+                          activeFocusOnTab: true
+                          enabled: root.appearance.textSize.state === "ok" && !root.appearanceBusy
+                          opacity: enabled ? 1 : 0.45
+                          color: Style.controlFill(activeFocus, textSizeHover.hovered, root.foreground, Color.accent)
+                          borderSpec: Border.controlSpec(activeFocus ? "focus" : (textSizeHover.hovered ? "hover-cursor" : "normal"), root.foreground, Color.accent)
+                          radius: Style.cornerRadius
+
+                          HoverHandler { id: textSizeHover }
+                          Keys.onPressed: function(event) {
+                            if (event.key === Qt.Key_Left || event.key === Qt.Key_Down) { root.requestTextSizeDelta(-1); event.accepted = true }
+                            else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up) { root.requestTextSizeDelta(1); event.accepted = true }
+                          }
+                          PanelSlider {
+                            anchors.fill: parent
+                            anchors.leftMargin: Style.spacing.md
+                            anchors.rightMargin: Style.spacing.md
+                            minimum: 0
+                            maximum: root.appearance.textSize.stops.length - 1
+                            step: 1
+                            integer: true
+                            tickCount: root.appearance.textSize.stops.length
+                            value: Model.textSizeIndex(root.appearance.textSize.stops, root.appearance.textSize.currentPx)
+                            trackColor: Style.selectedFillFor(root.foreground, Color.accent)
+                            fillColor: root.foreground
+                            knobColor: root.foreground
+                            tickColor: root.background
+                            onReleased: function(value) {
+                              var index = Math.max(0, Math.min(root.appearance.textSize.stops.length - 1, Math.round(value)))
+                              root.requestAppearanceSetting("text-size", root.appearance.textSize.stops[index])
+                            }
+                          }
+                        }
+                      }
+                    }
+
+                    PanelSectionHeader { width: parent.width; text: "BAR"; foreground: root.foreground; fontFamily: Style.font.family }
+
+                    BorderSurface {
+                      width: parent.width
+                      implicitHeight: barColumn.implicitHeight + Style.spacing.panelPadding * 2
+                      color: "transparent"
+                      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                      padding: Style.spacing.panelPadding
+                      opacity: root.appearance.bar.state === "ok" ? 1 : 0.45
+
+                      Column {
+                        id: barColumn
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: parent.contentLeftInset
+                        spacing: Style.spacing.md
+
+                        Text { text: "POSITION"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                        Row {
+                          width: parent.width
+                          spacing: Style.spacing.sm
+                          Repeater {
+                            model: ["top", "bottom", "left", "right"]
+                            delegate: Button {
+                              required property string modelData
+                              width: (parent.width - parent.spacing * 3) / 4
+                              text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
+                              selected: root.appearance.bar.position === modelData
+                              bordered: true
+                              focusable: true
+                              enabled: root.appearance.bar.state === "ok" && !root.appearanceBusy
+                              onClicked: root.requestAppearanceSetting("bar-position", modelData)
+                            }
+                          }
+                        }
+
+                        Row {
+                          width: parent.width
+                          spacing: Style.spacing.md
+                          Toggle {
+                            width: (parent.width - parent.spacing) / 2
+                            label: "Show bar"
+                            description: "The same visibility setting as Super+Shift+Space."
+                            checked: root.appearance.bar.visible
+                            enabled: root.appearance.bar.state === "ok" && !root.appearanceBusy
+                            foreground: root.foreground
+                            fontFamily: Style.font.family
+                            onClicked: root.requestAppearanceSetting("bar-visible", !root.appearance.bar.visible)
+                          }
+                          Toggle {
+                            width: (parent.width - parent.spacing) / 2
+                            label: "Transparent"
+                            description: "Let the desktop show through the bar surface."
+                            checked: root.appearance.bar.transparent
+                            enabled: root.appearance.bar.state === "ok" && !root.appearanceBusy
+                            foreground: root.foreground
+                            fontFamily: Style.font.family
+                            onClicked: root.requestAppearanceSetting("bar-transparency", !root.appearance.bar.transparent)
+                          }
+                        }
+                      }
+                    }
+
+                    PanelSectionHeader { width: parent.width; text: "DISPLAYS"; foreground: root.foreground; fontFamily: Style.font.family }
+
+                    BorderSurface {
+                      width: parent.width
+                      implicitHeight: displayRow.implicitHeight + Style.spacing.panelPadding * 2
+                      color: Style.normalFillFor(root.foreground, Color.accent)
+                      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                      padding: Style.spacing.panelPadding
+
+                      Row {
+                        id: displayRow
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: parent.contentLeftInset
+                        spacing: Style.spacing.md
+                        Text { text: root.appearance.display.count > 1 ? "󰍺" : "󰍹"; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.display; anchors.verticalCenter: parent.verticalCenter }
+                        Column {
+                          width: parent.width - parent.children[0].width - displayButton.width - parent.spacing * 2
+                          spacing: Style.spacing.xs
+                          Text { text: root.appearance.display.state === "ok" ? "Display" : "Display unavailable"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.subtitle; font.bold: true }
+                          Text { width: parent.width; text: Model.displaySummary(root.appearance.display); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                          Text { visible: root.appearance.display.brightnessAvailable; text: root.appearance.display.brightnessPercent + "% brightness"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                        }
+                        Button {
+                          id: displayButton
+                          text: "Open controls"
+                          iconText: "󰁔"
+                          bordered: true
+                          focusable: true
+                          enabled: root.appearance.display.state === "ok"
+                          anchors.verticalCenter: parent.verticalCenter
+                          onClicked: root.requestAppearanceHandoff("display")
+                        }
+                      }
+                    }
+
+                    Text {
+                      width: parent.width
+                      text: "Resolution, refresh rate, arrangement, and persistent monitor profiles remain planned for Devices."
+                      color: root.mutedText
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WordWrap
+                      horizontalAlignment: Text.AlignHCenter
                     }
                   }
                 }
@@ -1305,21 +1837,37 @@ Item {
           anchors.horizontalCenter: parent.horizontalCenter
           anchors.bottom: parent.bottom
           anchors.bottomMargin: Style.spacing.md
-          implicitWidth: Math.min(toastText.implicitWidth + Style.space(36), parent.width - Style.space(30))
-          implicitHeight: toastText.implicitHeight + Style.spacing.md * 2
+          implicitWidth: Math.min(toastRow.implicitWidth + Style.space(36), parent.width - Style.space(30))
+          implicitHeight: Math.max(toastText.implicitHeight, undoButton.implicitHeight) + Style.spacing.md * 2
           color: Color.popups.background
           borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, 1)
           padding: Style.spacing.md
-          Text {
-            id: toastText
+          Row {
+            id: toastRow
             anchors.centerIn: parent
-            width: Math.min(implicitWidth, keyCatcher.width - Style.space(60))
-            text: root.toastMessage
-            color: Color.popups.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-            horizontalAlignment: Text.AlignHCenter
+            spacing: Style.spacing.md
+            Text {
+              id: toastText
+              anchors.verticalCenter: parent.verticalCenter
+              width: Math.min(implicitWidth, keyCatcher.width - undoButton.width - Style.space(110))
+              text: root.toastMessage
+              color: Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+              horizontalAlignment: Text.AlignHCenter
+            }
+            Button {
+              id: undoButton
+              visible: root.undoAvailable
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Undo"
+              iconText: "󰕌"
+              bordered: true
+              focusable: true
+              foreground: Color.popups.text
+              onClicked: root.runUndo()
+            }
           }
         }
       }

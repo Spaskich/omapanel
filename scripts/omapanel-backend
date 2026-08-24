@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROGRAM_SCHEMA_VERSION=1
 DOCTOR_SCHEMA_VERSION=2
 DOCTOR_REPORT_SCHEMA_VERSION=1
+APPEARANCE_SCHEMA_VERSION=1
 CHECK_TIMEOUT="${OMAPANEL_CHECK_TIMEOUT:-3}"
 [[ $CHECK_TIMEOUT =~ ^[0-9]+([.][0-9]+)?$ ]] || CHECK_TIMEOUT=3
 OMAPANEL_VERSION="$(jq -r '.version // "unknown"' "$ROOT/manifest.json" 2>/dev/null || printf unknown)"
@@ -17,6 +18,9 @@ Usage:
   omapanel-backend collect programs --jsonl
   omapanel-backend collect doctor
   omapanel-backend collect health
+  omapanel-backend collect appearance
+  omapanel-backend appearance set <font|text-size|bar-position|bar-transparency|bar-visible> <value>
+  omapanel-backend appearance handoff <theme|background|font-install|display>
   omapanel-backend doctor [--json] [--copy | --output <path>]
   omapanel-backend action [--dry-run] <adapter> <target>
 EOF
@@ -447,6 +451,210 @@ timed_capture() {
   set -e
   printf -v "$variable" '%s' "$output"
   return "$rc"
+}
+
+appearance_error_json() {
+  jq -cn --arg provider "$1" --arg message "$2" \
+    '{provider:$provider,message:$message}'
+}
+
+collect_appearance() {
+  local theme_state=unavailable theme_name=Unknown theme_output=""
+  local background_state=unavailable background_name=Unknown background_path="" background_output=""
+  local font_state=unavailable font_current=Unknown font_output="" font_list_output="" fonts_json='[]'
+  local text_size_state=unavailable text_size_output="" text_size_px=0
+  local bar_state=unavailable bar_position=top bar_transparent=false bar_visible=true
+  local display_state=unavailable monitor_output="" brightness="" focused_monitor="" monitor_scale=""
+  local displays_json='[]' enabled_display_count=0 display_count=0 focused_width=0 focused_height=0
+  local brightness_available=false brightness_percent=0
+  local shell_config="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+  local omarchy_root="${OMARCHY_PATH:-/usr/share/omarchy}"
+  local default_shell_config="$omarchy_root/config/omarchy/shell.json"
+  local bar_config=""
+  local -a appearance_errors=()
+
+  if command -v omarchy >/dev/null 2>&1; then
+    if timed_capture theme_output omarchy theme current && [[ -n $theme_output ]]; then
+      theme_name="$theme_output"
+      theme_state=ok
+    else
+      appearance_errors+=("$(appearance_error_json theme 'The current Omarchy theme could not be read.')")
+    fi
+
+    if timed_capture background_output omarchy theme bg current && [[ -n $background_output ]]; then
+      background_name="$background_output"
+      background_path="$(readlink -f -- "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/background" 2>/dev/null || true)"
+      [[ -f $background_path ]] || background_path=""
+      background_state=ok
+    else
+      appearance_errors+=("$(appearance_error_json background 'The current Omarchy background could not be read.')")
+    fi
+
+    if timed_capture font_output omarchy font current && [[ -n $font_output ]] &&
+      timed_capture font_list_output omarchy font list; then
+      font_current="$font_output"
+      fonts_json="$(printf '%s\n' "$font_list_output" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')"
+      if jq -e 'length > 0' <<<"$fonts_json" >/dev/null; then
+        font_state=ok
+      else
+        appearance_errors+=("$(appearance_error_json font 'No installed monospace fonts were discovered.')")
+      fi
+    else
+      appearance_errors+=("$(appearance_error_json font 'Installed fonts could not be read from Omarchy.')")
+    fi
+
+    if timed_capture text_size_output omarchy display text size; then
+      text_size_px="$(sed -nE 's/^text size: ([0-9]+)( \(default\))? px$/\1/p' <<<"$text_size_output" | head -n1)"
+      if [[ $text_size_px =~ ^([9]|1[0-9]|20)$ ]]; then
+        text_size_state=ok
+      else
+        text_size_px=0
+        appearance_errors+=("$(appearance_error_json text-size 'The current desktop text size was not recognized.')")
+      fi
+    else
+      appearance_errors+=("$(appearance_error_json text-size 'The desktop text-size command is unavailable.')")
+    fi
+  else
+    appearance_errors+=("$(appearance_error_json omarchy 'The Omarchy command is unavailable.')")
+  fi
+
+  if [[ -s $shell_config ]]; then
+    bar_config="$shell_config"
+  elif [[ -s $default_shell_config ]]; then
+    bar_config="$default_shell_config"
+  fi
+  if [[ -n $bar_config ]] && jq -e '.bar | type == "object"' "$bar_config" >/dev/null 2>&1; then
+    bar_position="$(jq -r '.bar.position // "top"' "$bar_config")"
+    bar_transparent="$(jq -r '.bar.transparent // false' "$bar_config")"
+    if [[ $bar_position =~ ^(top|bottom|left|right)$ ]] && [[ $bar_transparent =~ ^(true|false)$ ]]; then
+      [[ -e ${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/bar-off ]] && bar_visible=false
+      bar_state=ok
+    else
+      appearance_errors+=("$(appearance_error_json bar 'The Omarchy bar configuration contains unsupported values.')")
+    fi
+  else
+    appearance_errors+=("$(appearance_error_json bar 'The Omarchy bar configuration could not be read.')")
+  fi
+
+  if command -v omarchy >/dev/null 2>&1 && timed_capture monitor_output omarchy monitor state; then
+    brightness="$(sed -n '1p' <<<"$monitor_output")"
+    focused_monitor="$(sed -n '6p' <<<"$monitor_output")"
+    monitor_scale="$(sed -n '7p' <<<"$monitor_output")"
+    displays_json="$(sed -n '8p' <<<"$monitor_output")"
+    if jq -e 'type == "array" and all(.[]; (.name | type == "string") and (.enabled | type == "boolean"))' \
+      <<<"$displays_json" >/dev/null 2>&1; then
+      display_count="$(jq 'length' <<<"$displays_json")"
+      enabled_display_count="$(jq '[.[] | select(.enabled)] | length' <<<"$displays_json")"
+      focused_width="$(jq -r --arg name "$focused_monitor" '[.[] | select(.name == $name)][0].width // 0' <<<"$displays_json")"
+      focused_height="$(jq -r --arg name "$focused_monitor" '[.[] | select(.name == $name)][0].height // 0' <<<"$displays_json")"
+      if [[ $brightness =~ ^[0-9]+$ ]] && (( brightness >= 0 && brightness <= 100 )); then
+        brightness_available=true
+        brightness_percent="$brightness"
+      fi
+      [[ $monitor_scale =~ ^[0-9]+([.][0-9]+)?$ ]] || monitor_scale=""
+      display_state=ok
+    else
+      displays_json='[]'
+      appearance_errors+=("$(appearance_error_json display 'The Omarchy display state was not recognized.')")
+    fi
+  else
+    appearance_errors+=("$(appearance_error_json display 'The Omarchy display panel state is unavailable.')")
+  fi
+
+  jq -cn \
+    --argjson schemaVersion "$APPEARANCE_SCHEMA_VERSION" \
+    --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg themeState "$theme_state" --arg themeName "$theme_name" \
+    --arg backgroundState "$background_state" --arg backgroundName "$background_name" --arg backgroundPath "$background_path" \
+    --arg fontState "$font_state" --arg fontCurrent "$font_current" --argjson fonts "$fonts_json" \
+    --arg textSizeState "$text_size_state" --argjson textSizePx "$text_size_px" \
+    --arg barState "$bar_state" --arg barPosition "$bar_position" --argjson barTransparent "$bar_transparent" --argjson barVisible "$bar_visible" \
+    --arg displayState "$display_state" --arg focusedMonitor "$focused_monitor" --arg monitorScale "$monitor_scale" \
+    --argjson brightnessAvailable "$brightness_available" --argjson brightnessPercent "$brightness_percent" \
+    --argjson displayCount "$display_count" --argjson enabledDisplayCount "$enabled_display_count" \
+    --argjson focusedWidth "$focused_width" --argjson focusedHeight "$focused_height" --argjson displays "$displays_json" \
+    --argjson errors "$(json_lines_to_array "${appearance_errors[@]}")" \
+    '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,
+      theme:{state:$themeState,current:$themeName},
+      background:{state:$backgroundState,current:$backgroundName,path:$backgroundPath},
+      font:{state:$fontState,current:$fontCurrent,installed:$fonts},
+      textSize:{state:$textSizeState,currentPx:$textSizePx,stops:[9,10,11,12,14,16,20]},
+      bar:{state:$barState,visible:$barVisible,position:$barPosition,transparent:$barTransparent},
+      display:{state:$displayState,focusedMonitor:$focusedMonitor,scale:$monitorScale,
+        brightnessAvailable:$brightnessAvailable,brightnessPercent:$brightnessPercent,
+        count:$displayCount,enabledCount:$enabledDisplayCount,
+        focusedWidth:$focusedWidth,focusedHeight:$focusedHeight,displays:$displays},
+      errors:$errors}'
+}
+
+appearance_result() {
+  jq -cn --arg setting "$1" --arg value "$2" --arg message "$3" \
+    '{schemaVersion:1,ok:true,setting:$setting,value:$value,message:$message}'
+}
+
+appearance_set() {
+  local setting="$1" value="$2" current_visible requested_visible flag
+  command -v omarchy >/dev/null 2>&1 || { echo 'The Omarchy command is unavailable.' >&2; return 1; }
+
+  case "$setting" in
+    font)
+      [[ -n $value && ${#value} -le 160 && $value != *$'\n'* && $value != *$'\r'* ]] || {
+        echo 'Invalid font family.' >&2; return 2;
+      }
+      omarchy font list 2>/dev/null | grep -Fx -- "$value" >/dev/null || {
+        echo "The selected font is not in Omarchy's installed-font list." >&2; return 2;
+      }
+      omarchy font set "$value" >/dev/null
+      appearance_result font "$value" "Font changed to $value."
+      ;;
+    text-size)
+      [[ $value =~ ^(9|10|11|12|14|16|20)$ ]] || {
+        echo 'Text size must be one of 9, 10, 11, 12, 14, 16, or 20.' >&2; return 2;
+      }
+      omarchy display text size "$value" >/dev/null
+      appearance_result text-size "$value" "Text size changed to ${value}px."
+      ;;
+    bar-position)
+      [[ $value =~ ^(top|bottom|left|right)$ ]] || {
+        echo 'Bar position must be top, bottom, left, or right.' >&2; return 2;
+      }
+      omarchy bar position "$value" >/dev/null
+      appearance_result bar-position "$value" "Bar moved to the $value."
+      ;;
+    bar-transparency)
+      [[ $value =~ ^(true|false)$ ]] || { echo 'Bar transparency must be true or false.' >&2; return 2; }
+      omarchy bar transparent "$value" >/dev/null
+      appearance_result bar-transparency "$value" "Bar transparency updated."
+      ;;
+    bar-visible)
+      [[ $value =~ ^(true|false)$ ]] || { echo 'Bar visibility must be true or false.' >&2; return 2; }
+      flag="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/bar-off"
+      current_visible=true
+      [[ -e $flag ]] && current_visible=false
+      requested_visible="$value"
+      if [[ $current_visible != "$requested_visible" ]]; then
+        omarchy toggle bar toggle >/dev/null
+      fi
+      if { [[ $requested_visible == true ]] && [[ -e $flag ]]; } ||
+        { [[ $requested_visible == false ]] && [[ ! -e $flag ]]; }; then
+        echo 'Omarchy did not apply the requested bar visibility.' >&2
+        return 1
+      fi
+      appearance_result bar-visible "$value" "Bar visibility updated."
+      ;;
+    *) echo "Unknown appearance setting: $setting" >&2; return 2 ;;
+  esac
+}
+
+appearance_handoff() {
+  command -v omarchy >/dev/null 2>&1 || { echo 'The Omarchy command is unavailable.' >&2; return 1; }
+  case "$1" in
+    theme) exec omarchy menu summon style.theme ;;
+    background) exec omarchy menu summon style.background ;;
+    font-install) exec omarchy menu summon install.style.font ;;
+    display) exec omarchy shell omarchy.monitor show ;;
+    *) echo "Unknown appearance handoff: $1" >&2; return 2 ;;
+  esac
 }
 
 check_omarchy() {
@@ -1222,6 +1430,23 @@ main() {
         doctor|health)
           [[ -z ${3:-} ]] || { usage; exit 2; }
           collect_doctor
+          ;;
+        appearance)
+          [[ -z ${3:-} ]] || { usage; exit 2; }
+          collect_appearance
+          ;;
+        *) usage; exit 2 ;;
+      esac
+      ;;
+    appearance)
+      case "${2:-}" in
+        set)
+          [[ $# == 4 ]] || { usage; exit 2; }
+          appearance_set "$3" "$4"
+          ;;
+        handoff)
+          [[ $# == 3 ]] || { usage; exit 2; }
+          appearance_handoff "$3"
           ;;
         *) usage; exit 2 ;;
       esac

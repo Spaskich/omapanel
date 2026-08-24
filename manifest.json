@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "spaskich.omapanel",
   "name": "OmaPanel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "spaskich",
   "license": "MIT",
   "description": "A keyboard-first, theme-native control center for Omarchy.",
