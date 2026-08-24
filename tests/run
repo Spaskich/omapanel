@@ -64,6 +64,27 @@ elif [[ ${1:-} == toggle && ${2:-} == bar && ${3:-} == toggle ]]; then
   printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
 elif [[ ${1:-} == monitor && ${2:-} == state ]]; then
   printf '%s\n' 42 eDP-1 HDMI-A-1 eDP-1 '' eDP-1 1.25 '[{"name":"eDP-1","enabled":true,"focused":true,"width":1920,"height":1080},{"name":"HDMI-A-1","enabled":false,"focused":false,"width":2560,"height":1440}]'
+elif [[ ${1:-} == hw && ${2:-} == touchpad ]]; then
+  [[ ${FIXTURE_TOUCHPAD_MISSING:-false} != true ]] && echo 'fixture-touchpad'
+elif [[ ${1:-} == toggle && ${2:-} == touchpad ]]; then
+  flag="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/hypr/touchpad-disabled.lua"
+  mkdir -p "$(dirname "$flag")"
+  if [[ ${FIXTURE_TOUCHPAD_APPLY_FAIL:-false} != true ]]; then
+    case "${3:-toggle}" in
+      on) rm -f "$flag" ;;
+      off) touch "$flag" ;;
+      toggle) if [[ -e $flag ]]; then rm -f "$flag"; else touch "$flag"; fi ;;
+    esac
+  fi
+  printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
+elif [[ ${1:-} == network && ${2:-} == status ]]; then
+  [[ ${FIXTURE_NETWORK_FAIL:-false} != true ]] || exit 1
+  if [[ ${3:-} == --verbose ]]; then
+    printf '%s\n' $'iface\twlan0' $'ip\t192.0.2.24' $'prefix\t24' $'type\twifi' $'ssid\tFixture Wi-Fi'
+  else
+    printf '%s\n' $'wifi\tFixture Wi-Fi\t73\t5180'
+  fi
+elif [[ ${1:-} == launch && ${2:-} == config && ${3:-} == editor ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
 elif [[ ${1:-} == menu || ${1:-} == shell ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
 else exit 0
 fi
@@ -79,6 +100,16 @@ cat >"$TMP/bin/hyprctl" <<'EOF'
 #!/bin/bash
 if [[ ${1:-} == binds ]]; then
   echo '[]'
+elif [[ ${1:-} == monitors && ${2:-} == all && ${3:-} == -j ]]; then
+  [[ ${FIXTURE_DISPLAY_FAIL:-false} != true ]] || exit 1
+  cat <<'JSON'
+[{"id":0,"name":"eDP-1","description":"Fixture Internal SERIAL-PRIVATE","make":"Fixture","model":"Panel 14","serial":"SERIAL-PRIVATE","width":1920,"height":1080,"refreshRate":59.951,"x":0,"y":0,"scale":1.25,"transform":0,"focused":true,"disabled":false},{"id":1,"name":"HDMI-A-1","description":"Fixture External OTHER-SERIAL","make":"Fixture","model":"Desk 27","serial":"OTHER-SERIAL","width":2560,"height":1440,"refreshRate":144.006,"x":1920,"y":0,"scale":1,"transform":0,"focused":false,"disabled":true}]
+JSON
+elif [[ ${1:-} == devices && ${2:-} == -j ]]; then
+  [[ ${FIXTURE_INPUT_FAIL:-false} != true ]] || exit 1
+  cat <<'JSON'
+{"mice":[{"address":"0xprivate","name":"fixture-mouse","defaultSpeed":0.25,"scrollFactor":1.5},{"address":"0xprivate2","name":"fixture-touchpad","defaultSpeed":0,"scrollFactor":1}],"keyboards":[{"address":"0xprivate3","name":"fixture-keyboard","main":true,"active_keymap":"English (US)"}],"tablets":[{"address":"0xprivate4","name":"fixture-tablet"}],"touch":[{"address":"0xprivate5","name":"fixture-touchscreen"}],"switches":[]}
+JSON
 elif [[ ${1:-} == configerrors && -n ${FIXTURE_HYPR_ERRORS:-} ]]; then
   printf '%s\n' "$FIXTURE_HYPR_ERRORS"
 else
@@ -159,10 +190,11 @@ export XDG_DATA_DIRS="$TMP/system/share"
 export XDG_STATE_HOME="$TMP/home/.local/state"
 export FIXTURE_ACTION_LOG="$TMP/appearance-actions"
 
-mkdir -p "$HOME/.config/omarchy" "$XDG_STATE_HOME/omarchy/current/theme/backgrounds"
+mkdir -p "$HOME/.config/omarchy" "$HOME/.config/hypr" "$XDG_STATE_HOME/omarchy/current/theme/backgrounds"
 cat >"$HOME/.config/omarchy/shell.json" <<'EOF'
 {"version":1,"bar":{"position":"bottom","transparent":true,"layout":{"left":[],"center":[],"right":[]}},"plugins":[]}
 EOF
+touch "$HOME/.config/hypr/monitors.lua" "$HOME/.config/hypr/input.lua"
 touch "$XDG_STATE_HOME/omarchy/current/theme/backgrounds/0-fixture-hills.jpg"
 ln -s "$XDG_STATE_HOME/omarchy/current/theme/backgrounds/0-fixture-hills.jpg" "$XDG_STATE_HOME/omarchy/current/background"
 
@@ -217,6 +249,41 @@ grep -Fx 'background set /tmp/fixture-background.jpg' "$FIXTURE_ACTION_LOG" >/de
 grep -Fx 'menu summon style.unlock' "$FIXTURE_ACTION_LOG" >/dev/null || fail "unlock picker handoff"
 grep -Fx 'menu summon install.style.font' "$FIXTURE_ACTION_LOG" >/dev/null || fail "font install handoff"
 grep -Fx 'shell omarchy.monitor show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "display panel handoff"
+
+devices="$("$ROOT/scripts/omapanel-backend" collect devices)"
+jq -e '.schemaVersion == 1 and .display.state == "ok" and .display.focusedMonitor == "eDP-1" and .display.brightnessPercent == 42 and (.display.displays | length) == 2' <<<"$devices" >/dev/null || fail "device display state"
+jq -e '.display.displays[0] | .label == "Panel 14" and .refreshHz == 59.95 and .scale == 1.25 and .x == 0 and .enabled == true' <<<"$devices" >/dev/null || fail "device display normalization"
+jq -e '.input.state == "ok" and .input.mainKeyboard.keymap == "English (US)" and .input.touchpad == {present:true,name:"fixture-touchpad",enabled:true} and (.input.pointers | length) == 2' <<<"$devices" >/dev/null || fail "device input state"
+jq -e '.network == {state:"ok",type:"wifi",interface:"wlan0",ssid:"Fixture Wi-Fi",signal:73,ip:"192.0.2.24",prefix:"24"}' <<<"$devices" >/dev/null || fail "device network state"
+[[ $devices != *SERIAL-PRIVATE* && $devices != *0xprivate* ]] || fail "device response leaked hardware identifiers"
+
+devices_without_display="$(FIXTURE_DISPLAY_FAIL=true "$ROOT/scripts/omapanel-backend" collect devices)"
+jq -e '.display.state == "unavailable" and (.errors[] | select(.provider == "display")) and .input.state == "ok" and .network.state == "ok"' <<<"$devices_without_display" >/dev/null || fail "device display failure isolation"
+devices_without_input="$(FIXTURE_INPUT_FAIL=true "$ROOT/scripts/omapanel-backend" collect devices)"
+jq -e '.input.state == "unavailable" and (.errors[] | select(.provider == "input")) and .display.state == "ok"' <<<"$devices_without_input" >/dev/null || fail "device input failure isolation"
+devices_without_network="$(FIXTURE_NETWORK_FAIL=true "$ROOT/scripts/omapanel-backend" collect devices)"
+jq -e '.network.state == "unavailable" and (.errors[] | select(.provider == "network")) and .display.state == "ok"' <<<"$devices_without_network" >/dev/null || fail "device network failure isolation"
+
+touchpad_result="$($ROOT/scripts/omapanel-backend devices set touchpad false)"
+jq -e '.ok and .setting == "touchpad" and .value == false and .previous == true' <<<"$touchpad_result" >/dev/null || fail "touchpad setting result"
+[[ -e $XDG_STATE_HOME/omarchy/toggles/hypr/touchpad-disabled.lua ]] || fail "touchpad was not disabled"
+$ROOT/scripts/omapanel-backend devices set touchpad false >/dev/null
+[[ $(grep -c '^toggle touchpad off$' "$FIXTURE_ACTION_LOG") == 1 ]] || fail "touchpad desired state toggled twice"
+$ROOT/scripts/omapanel-backend devices set touchpad true >/dev/null
+[[ ! -e $XDG_STATE_HOME/omarchy/toggles/hypr/touchpad-disabled.lua ]] || fail "touchpad was not enabled"
+if FIXTURE_TOUCHPAD_APPLY_FAIL=true "$ROOT/scripts/omapanel-backend" devices set touchpad false >/dev/null 2>&1; then fail "unverified touchpad change accepted"; fi
+if "$ROOT/scripts/omapanel-backend" devices set touchpad maybe >/dev/null 2>&1; then fail "invalid touchpad value accepted"; fi
+if "$ROOT/scripts/omapanel-backend" devices handoff '../unsafe' >/dev/null 2>&1; then fail "unknown device handoff accepted"; fi
+
+for handoff in display audio bluetooth network monitor-config input-config; do
+  "$ROOT/scripts/omapanel-backend" devices handoff "$handoff"
+done
+grep -Fx 'shell omarchy.monitor show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "device display handoff"
+grep -Fx 'shell omarchy.audio show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "device audio handoff"
+grep -Fx 'shell omarchy.bluetooth show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "device Bluetooth handoff"
+grep -Fx 'shell omarchy.network show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "device network handoff"
+grep -Fx "launch config editor $HOME/.config/hypr/monitors.lua" "$FIXTURE_ACTION_LOG" >/dev/null || fail "monitor config handoff"
+grep -Fx "launch config editor $HOME/.config/hypr/input.lua" "$FIXTURE_ACTION_LOG" >/dev/null || fail "input config handoff"
 
 doctor="$("$ROOT/scripts/omapanel-backend" collect doctor)"
 jq -e '.schemaVersion == 2 and (.checks | length) == 11 and .overall.counts.total == 11' <<<"$doctor" >/dev/null || fail "Doctor schema"
@@ -301,7 +368,7 @@ OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" >/dev/nu
 [[ $(grep -c '^o.bind("SUPER + I"' "$config/hypr/bindings.lua") == 1 ]] || fail "binding setup is not idempotent"
 grep -q 'https://example.test/a//b' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "JSONC string changed"
 [[ -L $HOME/.local/bin/omapanel && $(readlink -f "$HOME/.local/bin/omapanel") == "$ROOT/bin/omapanel" ]] || fail "CLI link setup"
-[[ $("$HOME/.local/bin/omapanel" --version) == 0.3.0 ]] || fail "linked CLI execution"
+[[ $("$HOME/.local/bin/omapanel" --version) == 0.4.0 ]] || fail "linked CLI execution"
 OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" --remove >/dev/null
 ! grep -q 'setup.omapanel' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "menu removal failed"
 ! grep -q '^o.bind("SUPER + I"' "$config/hypr/bindings.lua" || fail "binding removal failed"

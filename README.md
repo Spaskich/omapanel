@@ -1,8 +1,9 @@
 # OmaPanel
 
 **The Omarchy Control Center.** OmaPanel is a keyboard-first, mouse-complete
-Quattro panel for appearance, installed software, system health, and reaching
-the correct Omarchy workflow when something needs to change.
+Quattro panel for appearance, installed software, system health, connected
+devices, and reaching the correct Omarchy workflow when something needs to
+change.
 
 OmaPanel is intentionally a map, not a second package manager. It collects
 state without privilege, explains ownership and impact, and delegates changes
@@ -10,7 +11,7 @@ to the existing Omarchy command or workflow that already owns the operation.
 
 ## Features
 
-- Responsive Overview, Appearance, Programs, and Doctor pages.
+- Responsive Overview, Appearance, Programs, Doctor, and Devices pages.
 - Live Omarchy theme, type-scale, spacing, focus, and surface colors.
 - Current theme and background preview with native Omarchy picker handoffs that
   return to the same OmaPanel view when selection finishes.
@@ -18,7 +19,10 @@ to the existing Omarchy command or workflow that already owns the operation.
 - Installed-font selection, global text-size controls, and one-level undo.
 - Bar visibility, position, and transparency through canonical Omarchy
   commands.
-- Read-only display summary with a handoff to Quattro's Display panel.
+- Unified Devices page with current monitor modes, input inventory, live audio,
+  Bluetooth and network summaries, and native Quattro handoffs.
+- Canonical touchpad control with one-level undo; other device changes stay in
+  Omarchy's existing panels and configuration workflows.
 - Applications, web apps, TUI launchers, plugins, Flatpaks, local launchers,
   and an opt-in advanced Pacman/AUR package list.
 - Package/launcher ownership and protected first-party components.
@@ -120,9 +124,9 @@ useful for diagnosis.
 
 | Keys | Action |
 |---|---|
-| `Alt+1/2/3/4` | Overview / Appearance / Programs / Doctor |
-| `Tab` / `Shift+Tab` | Move through Appearance controls |
-| `Ctrl+Z` | Undo the latest direct Appearance change while offered |
+| `Alt+1/2/3/4/5` | Overview / Appearance / Programs / Doctor / Devices |
+| `Tab` / `Shift+Tab` | Move through page controls |
+| `Ctrl+Z` | Undo the latest direct setting while offered |
 | `Page Up/Down`, `Home/End` | Scroll the Appearance page |
 | `↑` `↓` or `j` `k` | Move through rows |
 | `Ctrl+N` / `Ctrl+P` | Next / previous row |
@@ -156,6 +160,11 @@ right-click.
   pickers or panels.
 - Direct font, text-size, and basic bar changes offer an eight-second undo and
   never edit Omarchy configuration themselves.
+- Device discovery omits serial and hardware addresses. Local interface and IP
+  details stay inside the panel and never enter Doctor exports.
+- Touchpad state is the only direct Devices write. Resolution, refresh,
+  arrangement, audio, Bluetooth, network, keyboard, and mouse changes are
+  delegated to their existing Omarchy workflows.
 - Mise versions are visibility-only because `mise uninstall` does not update
   the configuration files that requested a tool.
 

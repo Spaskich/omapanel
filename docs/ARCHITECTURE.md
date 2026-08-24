@@ -26,6 +26,11 @@ selected setting ── exact validation ── canonical Omarchy command ──
                                   └─ previous value ── time-bounded UI undo
 picker/display request ── allowlisted handoff ── existing Quattro surface
 
+backend collect devices ── displays/input/network detail ─┐
+Quickshell device services ── live audio/Bluetooth/network ├─ Devices categories
+touchpad desired state ── canonical Omarchy command ───────┘
+device/config request ── fixed allowlist ── existing Quattro/editor surface
+
 selected action ── dry-run validation ── confirmation ── validated adapter
                                                     └─ existing Omarchy workflow
 ```
@@ -60,8 +65,11 @@ scripts/omapanel-backend collect programs --jsonl
 scripts/omapanel-backend collect doctor
 scripts/omapanel-backend collect health
 scripts/omapanel-backend collect appearance
+scripts/omapanel-backend collect devices
 scripts/omapanel-backend appearance set <setting> <value>
 scripts/omapanel-backend appearance handoff <theme|background|unlock|font-install|display>
+scripts/omapanel-backend devices set touchpad <true|false>
+scripts/omapanel-backend devices handoff <display|audio|bluetooth|network|monitor-config|input-config>
 scripts/omapanel-backend doctor [--json] [--copy | --output <path>]
 scripts/omapanel-backend action --dry-run <adapter> <target>
 scripts/omapanel-backend action <adapter> <target>
@@ -89,6 +97,19 @@ UI serializes writes, refreshes state after completion, and retains one prior
 value for eight seconds. Theme/background selection, font installation, and
 display changes remain owned by Omarchy's existing pickers and panels.
 
+Devices uses an internal `schemaVersion: 1` document. Timeout-bounded
+Hyprland/Omarchy providers normalize monitor modes, input inventory, touchpad
+state, and local connection detail without serial or hardware addresses.
+PipeWire, Bluetooth, and NetworkManager state binds directly to the same
+Quickshell modules used by Quattro. Provider failure is isolated by category.
+
+The touchpad desired-state command is the only direct Devices write. It accepts
+literal booleans, calls `omarchy toggle touchpad on|off`, verifies the canonical
+state, serializes UI writes, and exposes the previous value for eight seconds.
+All other device buttons are fixed handoffs. Monitor configuration remains
+read-only until an external guardian can restore runtime and persistent state
+independently of the panel process.
+
 ## Terminal and report boundary
 
 `bin/omapanel` resolves its own plugin root and delegates Doctor to the shared
@@ -115,7 +136,7 @@ change reevaluates the existing surface.
 
 ## Extension boundary
 
-Pages already share internal records and registry-like conventions, but v0.2
-does not publish a third-party provider API. Once OmaPanel has first-party
+Pages already share internal records and registry-like conventions, but
+OmaPanel does not publish a third-party provider API. Once it has first-party
 experience, Omarchy can decide whether existing panels should contribute
 summary/action providers through a reviewed shell contract.

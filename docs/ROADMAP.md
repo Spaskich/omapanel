@@ -35,11 +35,15 @@
 
 ## v0.4 — Devices
 
-- Resolution, refresh rate, arrangement, persistent monitor profiles, and
-  per-device keyboard, mouse, and touchpad settings.
-- Audio, Bluetooth, and network summaries using Quattro's existing services.
-- Any editable configuration must be transactional: backup, validate, apply,
-  and offer rollback.
+- Add a unified Display, Audio, Bluetooth, Network, and Input dashboard with
+  current monitor modes and device inventory.
+- Use Quattro's live services for Audio, Bluetooth, and Network summaries, then
+  open their native panels for substantive changes.
+- Offer only Omarchy's canonical touchpad toggle directly, with desired-state
+  verification and one-level undo. Hand advanced monitor and input setup to
+  their existing configuration editors.
+- Keep resolution, refresh, arrangement, persistent monitor profiles, and
+  other per-device writes read-only until guarded rollback exists.
 
 ## v0.5 — Storage
 
@@ -62,6 +66,22 @@
   Omarchy's existing Style menu workflows, with confirmation before reset.
 - Keep Theme, Background, Unlock, Font, and Menu Bar in Appearance rather than
   duplicating them in this later milestone.
+
+## v0.7 — Safe display configuration
+
+- Require a structured upstream Omarchy API or an independently supervised
+  helper; the panel must never write `monitors.lua` by itself.
+- Preview the complete proposed layout without changing runtime state, then
+  snapshot runtime and persistent configuration before temporary application.
+- Start an external rollback guardian before applying. Show keyboard- and
+  mouse-accessible Keep/Revert controls with a 15-second countdown.
+- Revert automatically on timeout, panel or shell failure, command failure,
+  monitor disconnect, or loss of every usable output.
+- Persist atomically only after explicit confirmation and successful
+  validation, preserving a timestamped backup.
+- Test invalid modes, disabled primary outputs, hot unplug, multi-monitor
+  layouts, IPC loss, helper crashes, failed persistence, and recovery without
+  a visible display before release.
 
 ## Core adoption
 

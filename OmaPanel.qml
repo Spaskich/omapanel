@@ -2,7 +2,10 @@ import QtQuick
 import QtQuick.Controls as QQC
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Bluetooth
 import Quickshell.Io
+import Quickshell.Networking
+import Quickshell.Services.Pipewire
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
@@ -15,7 +18,7 @@ Item {
   property var manifest: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "spaskich.omapanel"
-  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.3.0"
+  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.4.0"
   readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string backendPath: sourceDir + "/scripts/omapanel-backend"
   readonly property var appLibrary: shell ? shell.appLibrary : null
@@ -28,6 +31,7 @@ Item {
   property var programsRaw: []
   property var healthRaw: []
   property var appearance: Model.emptyAppearance()
+  property var devices: Model.emptyDevices()
   property var appMetadata: ({})
   property string programQuery: ""
   property string programFilter: "all"
@@ -35,6 +39,7 @@ Item {
   property bool showAdvanced: false
   property int selectedProgramIndex: 0
   property int selectedHealthIndex: 0
+  property int selectedDeviceIndex: 0
   property int programRevision: 0
   property int healthRevision: 0
 
@@ -42,6 +47,8 @@ Item {
   property bool healthLoading: false
   property bool appearanceLoading: false
   property bool appearanceBusy: false
+  property bool devicesLoading: false
+  property bool devicesBusy: false
   property string programsError: ""
   property string healthError: ""
   property string programOutput: ""
@@ -49,6 +56,8 @@ Item {
   property string doctorGeneratedAt: ""
   property string appearanceOutput: ""
   property string appearanceError: ""
+  property string devicesOutput: ""
+  property string devicesError: ""
   property string pendingAppearanceSetting: ""
   property string pendingAppearanceValue: ""
   property var pendingAppearancePrevious: null
@@ -56,9 +65,15 @@ Item {
   property string appearanceActionOutput: ""
   property string pendingHandoff: ""
   property string handoffOutput: ""
+  property string pendingDeviceHandoff: ""
+  property string pendingDeviceValue: ""
+  property var pendingDevicePrevious: null
+  property bool pendingDeviceIsUndo: false
+  property string deviceActionOutput: ""
   property bool undoAvailable: false
   property string undoSetting: ""
   property var undoValue: null
+  property string undoDomain: ""
 
   property bool confirmOpen: false
   property var pendingPreview: ({})
@@ -84,6 +99,52 @@ Item {
   readonly property bool narrow: cardWidth < Style.space(820)
   readonly property int desiredCardHeight: Style.space(760)
   readonly property int cardHeight: Math.min(desiredCardHeight, panel.height - Style.gapsOut * 4)
+
+  readonly property var deviceCategories: [
+    { id: "display", title: "Display", icon: "󰍹", description: "Monitors, current modes, scale, position and brightness" },
+    { id: "audio", title: "Audio", icon: "󰕾", description: "Default output, input, volume and mute state" },
+    { id: "bluetooth", title: "Bluetooth", icon: "󰂯", description: "Adapter power and connected devices" },
+    { id: "network", title: "Network", icon: "󰛳", description: "Active connection, signal, interface and local address" },
+    { id: "input", title: "Input", icon: "", description: "Keyboard layout, pointers, touch and tablet devices" }
+  ]
+
+  readonly property var audioSink: Pipewire.defaultAudioSink
+  readonly property var audioSource: Pipewire.defaultAudioSource
+  readonly property var trackedAudioObjects: {
+    var result = []
+    if (audioSink) result.push(audioSink)
+    if (audioSource) result.push(audioSource)
+    return result
+  }
+  readonly property var audioSnapshot: Model.normalizeAudioSnapshot({
+    state: audioSink || audioSource ? "ok" : "unavailable",
+    outputName: audioNodeLabel(audioSink, "No output"),
+    inputName: audioNodeLabel(audioSource, "No input"),
+    outputVolume: audioSink && audioSink.audio ? audioSink.audio.volume : 0,
+    outputMuted: audioSink && audioSink.audio ? audioSink.audio.muted : false,
+    inputVolume: audioSource && audioSource.audio ? audioSource.audio.volume : 0,
+    inputMuted: audioSource && audioSource.audio ? audioSource.audio.muted : false
+  })
+  readonly property var bluetoothAdapter: Bluetooth.defaultAdapter
+  readonly property var bluetoothDevices: Bluetooth.devices ? Bluetooth.devices.values : []
+  readonly property var bluetoothSnapshot: Model.normalizeBluetoothSnapshot({
+    state: bluetoothAdapter ? "ok" : "unavailable",
+    powered: bluetoothAdapter ? bluetoothAdapter.enabled : false,
+    connectedNames: connectedBluetoothNames()
+  })
+  readonly property bool networkManagerAvailable: Networking.backend === NetworkBackendType.NetworkManager
+  readonly property var networkDevices: Networking.devices ? Networking.devices.values : []
+  readonly property var wifiDevice: findNetworkDevice(DeviceType.Wifi)
+  readonly property var wiredDevice: findNetworkDevice(DeviceType.Wired)
+  readonly property var connectedWifiNetwork: findConnectedWifiNetwork()
+  readonly property var networkSnapshot: Model.normalizeNetworkSnapshot({
+    state: networkManagerAvailable || devices.network.state === "ok" ? "ok" : "unavailable",
+    type: wiredDevice && wiredDevice.connected ? "ethernet" : connectedWifiNetwork ? "wifi" : devices.network.type,
+    wifiEnabled: networkManagerAvailable ? Networking.wifiEnabled : true,
+    ssid: connectedWifiNetwork ? connectedWifiNetwork.name : devices.network.ssid,
+    signal: connectedWifiNetwork ? Math.round((connectedWifiNetwork.signalStrength || 0) * 100) : devices.network.signal,
+    details: devices.network
+  })
 
   readonly property var counts: {
     programRevision
@@ -122,12 +183,13 @@ Item {
   }
 
   function setPage(index) {
-    pageIndex = Math.max(0, Math.min(3, index))
+    pageIndex = Math.max(0, Math.min(4, index))
     detailOpen = false
     cursorActive = true
     if (pageIndex === 1 && appearance.generatedAt === "" && !appearanceLoading) refreshAppearance()
     if (pageIndex === 2 && programsRaw.length === 0 && !programsLoading) refreshPrograms()
     if (pageIndex === 3 && healthRaw.length === 0 && !healthLoading) refreshHealth()
+    if (pageIndex === 4 && devices.generatedAt === "" && !devicesLoading) refreshDevices()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -135,6 +197,125 @@ Item {
     refreshAppearance()
     refreshPrograms()
     refreshHealth()
+    refreshDevices()
+  }
+
+  function audioNodeLabel(node, fallback) {
+    if (!node) return String(fallback || "Unavailable")
+    try {
+      var properties = node.ready && node.properties ? node.properties : ({})
+      if (node.nickname) return String(node.nickname)
+      if (node.nick) return String(node.nick)
+      if (properties["node.nick"]) return String(properties["node.nick"])
+      if (properties["device.profile.description"]) return String(properties["device.profile.description"])
+      if (node.description) return String(node.description)
+      if (properties["node.description"]) return String(properties["node.description"])
+      if (node.name) return String(node.name)
+    } catch (e) { }
+    return String(fallback || "Unavailable")
+  }
+
+  function connectedBluetoothNames() {
+    var result = []
+    var source = bluetoothDevices || []
+    for (var i = 0; i < source.length; i++) {
+      var device = source[i]
+      if (!device || !device.connected) continue
+      var label = "Connected device"
+      try {
+        if (device.deviceName) label = String(device.deviceName)
+        else if (device.name) label = String(device.name)
+        else if (device.alias) label = String(device.alias)
+      } catch (e) { }
+      if (result.indexOf(label) === -1) result.push(label)
+    }
+    return result
+  }
+
+  function findNetworkDevice(type) {
+    var source = networkDevices || []
+    var fallback = null
+    for (var i = 0; i < source.length; i++) {
+      var device = source[i]
+      if (!device || device.type !== type) continue
+      if (!fallback) fallback = device
+      if (device.connected) return device
+    }
+    return fallback
+  }
+
+  function findConnectedWifiNetwork() {
+    var source = wifiDevice && wifiDevice.networks ? wifiDevice.networks.values : []
+    for (var i = 0; i < source.length; i++) {
+      if (source[i] && source[i].connected) return source[i]
+    }
+    return null
+  }
+
+  function refreshDevices() {
+    if (devicesProc.running || backendPath === "") return
+    devicesLoading = true
+    devicesError = ""
+    devicesOutput = ""
+    devicesProc.running = true
+  }
+
+  function applyDevices(raw) {
+    try {
+      var parsed = JSON.parse(String(raw || ""))
+      var normalized = Model.normalizeDevices(parsed)
+      if (!normalized) throw new Error("Unsupported devices response")
+      devices = normalized
+      devicesError = ""
+    } catch (e) {
+      devicesError = "Devices could not be read: " + e
+    }
+  }
+
+  function deviceSummary(id) {
+    switch (String(id || "")) {
+      case "display": return Model.deviceDisplaySummary(devices.display)
+      case "audio": return Model.audioSummary(audioSnapshot)
+      case "bluetooth": return Model.bluetoothSummary(bluetoothSnapshot)
+      case "network": return Model.networkSummary(networkSnapshot)
+      case "input": return Model.inputSummary(devices.input)
+      default: return "Unavailable"
+    }
+  }
+
+  function deviceAvailable(id) {
+    switch (String(id || "")) {
+      case "display": return devices.display.state === "ok"
+      case "audio": return audioSnapshot.state === "ok"
+      case "bluetooth": return bluetoothSnapshot.state === "ok"
+      case "network": return networkSnapshot.state === "ok"
+      case "input": return devices.input.state === "ok"
+      default: return false
+    }
+  }
+
+  function openDevicesCategory(index) {
+    selectedDeviceIndex = Math.max(0, Math.min(deviceCategories.length - 1, Number(index) || 0))
+    setPage(4)
+  }
+
+  function requestDeviceHandoff(kind) {
+    if (deviceHandoffProc.running || devicesBusy) return
+    pendingDeviceHandoff = String(kind)
+    deviceHandoffProc.running = true
+  }
+
+  function requestTouchpad(value, isUndo) {
+    if (devicesBusy || devicesLoading || !devices.input.touchpad.present) return
+    var previous = devices.input.touchpad.enabled
+    var requested = value === true
+    if (previous === requested && isUndo !== true) return
+    pendingDeviceValue = String(requested)
+    pendingDevicePrevious = previous
+    pendingDeviceIsUndo = isUndo === true
+    deviceActionOutput = ""
+    devicesBusy = true
+    deviceSetProc.running = true
   }
 
   function refreshAppearance() {
@@ -188,7 +369,14 @@ Item {
   }
 
   function runUndo() {
-    if (!undoAvailable || appearanceBusy || undoValue === null || undoValue === undefined) return
+    if (!undoAvailable || appearanceBusy || devicesBusy || undoValue === null || undoValue === undefined) return
+    if (undoDomain === "devices") {
+      var devicePrevious = undoValue === true
+      undoAvailable = false
+      undoTimer.stop()
+      requestTouchpad(devicePrevious, true)
+      return
+    }
     pendingAppearanceSetting = undoSetting
     pendingAppearanceValue = String(undoValue)
     pendingAppearancePrevious = null
@@ -200,11 +388,12 @@ Item {
     appearanceSetProc.running = true
   }
 
-  function showUndoToast(message, setting, previous) {
+  function showUndoToast(message, setting, previous, domain) {
     toastTimer.stop()
     toastMessage = String(message || "Setting changed.")
     undoSetting = String(setting)
     undoValue = previous
+    undoDomain = String(domain || "appearance")
     undoAvailable = true
     undoTimer.restart()
   }
@@ -213,6 +402,7 @@ Item {
     undoAvailable = false
     undoSetting = ""
     undoValue = null
+    undoDomain = ""
     undoTimer.stop()
     toastMessage = ""
   }
@@ -346,12 +536,16 @@ Item {
       selectedHealthIndex = Model.wrapIndex(selectedHealthIndex, delta, healthModel.count)
       healthRevision++
       healthList.positionViewAtIndex(selectedHealthIndex, ListView.Contain)
+    } else if (pageIndex === 4 && deviceCategories.length > 0) {
+      selectedDeviceIndex = Model.wrapIndex(selectedDeviceIndex, delta, deviceCategories.length)
+      if (deviceList) deviceList.positionViewAtIndex(selectedDeviceIndex, ListView.Contain)
     }
   }
 
   function activateSelected() {
     if (pageIndex === 2 && selectedProgramRow) detailOpen = true
     else if (pageIndex === 3 && selectedHealthRow) detailOpen = true
+    else if (pageIndex === 4) detailOpen = true
   }
 
   function requestSelectedAction() {
@@ -521,6 +715,8 @@ Item {
     }
   }
 
+  PwObjectTracker { objects: root.trackedAudioObjects }
+
   Process {
     id: programsProc
     command: [root.backendPath, "collect", "programs", "--jsonl"]
@@ -575,6 +771,63 @@ Item {
       root.appearanceLoading = false
       if (exitCode !== 0 && root.appearanceOutput === "")
         root.appearanceError = String(appearanceStderr.text || "Appearance could not be refreshed.").trim()
+    }
+  }
+
+  Process {
+    id: devicesProc
+    command: [root.backendPath, "collect", "devices"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.devicesOutput = text
+        if (text) root.applyDevices(text)
+      }
+    }
+    stderr: StdioCollector { id: devicesStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.devicesLoading = false
+      if (exitCode !== 0 && root.devicesOutput === "")
+        root.devicesError = String(devicesStderr.text || "Devices could not be refreshed.").trim()
+    }
+  }
+
+  Process {
+    id: deviceSetProc
+    command: [root.backendPath, "devices", "set", "touchpad", root.pendingDeviceValue]
+    stdout: StdioCollector {
+      id: deviceSetStdout
+      waitForEnd: true
+      onStreamFinished: root.deviceActionOutput = text
+    }
+    stderr: StdioCollector { id: deviceSetStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.devicesBusy = false
+      if (exitCode === 0) {
+        var message = root.pendingDeviceIsUndo ? "Change undone." : "Touchpad setting changed."
+        try {
+          var result = JSON.parse(String(root.deviceActionOutput || deviceSetStdout.text || ""))
+          if (!root.pendingDeviceIsUndo && result.message) message = result.message
+        } catch (e) { }
+        if (root.pendingDeviceIsUndo) root.showToast(message)
+        else root.showUndoToast(message, "touchpad", root.pendingDevicePrevious, "devices")
+      } else {
+        root.showToast(String(deviceSetStderr.text || "The touchpad setting could not be changed.").trim())
+      }
+      root.refreshDevices()
+    }
+  }
+
+  Process {
+    id: deviceHandoffProc
+    command: [root.backendPath, "devices", "handoff", root.pendingDeviceHandoff]
+    stderr: StdioCollector { id: deviceHandoffStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.requestClose()
+      else {
+        root.showToast(String(deviceHandoffStderr.text || "The Omarchy device workflow could not be opened.").trim())
+        Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      }
     }
   }
 
@@ -761,9 +1014,10 @@ Item {
             if (root.pageIndex === 1) root.refreshAppearance()
             else if (root.pageIndex === 2) root.refreshPrograms()
             else if (root.pageIndex === 3) root.refreshHealth()
+            else if (root.pageIndex === 4) root.refreshDevices()
             else root.refreshAll()
             event.accepted = true
-          } else if (alt && event.key >= Qt.Key_1 && event.key <= Qt.Key_4) {
+          } else if (alt && event.key >= Qt.Key_1 && event.key <= Qt.Key_5) {
             root.setPage(event.key - Qt.Key_1); event.accepted = true
           } else if (root.pageIndex === 1 && !keyCatcher.activeFocus) {
             return
@@ -816,15 +1070,15 @@ Item {
             }
 
             Text {
-              visible: root.appearanceLoading || root.programsLoading || root.healthLoading
-              text: root.appearanceLoading ? "Reading appearance" : root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Running Doctor"
+              visible: root.appearanceLoading || root.programsLoading || root.healthLoading || root.devicesLoading
+              text: root.appearanceLoading ? "Reading appearance" : root.devicesLoading ? "Reading devices" : root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Running Doctor"
               color: root.mutedText
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
 
             Text {
-              visible: root.appearanceLoading || root.programsLoading || root.healthLoading
+              visible: root.appearanceLoading || root.programsLoading || root.healthLoading || root.devicesLoading
               text: "󰑐"
               color: root.selectedText
               font.family: Style.font.family
@@ -879,7 +1133,8 @@ Item {
                   { label: "Overview", icon: "󰋜", hint: "Alt+1" },
                   { label: "Appearance", icon: "󰏘", hint: "Alt+2" },
                   { label: "Programs", icon: "󰀻", hint: "Alt+3" },
-                  { label: "Doctor", icon: "󰒘", hint: "Alt+4" }
+                  { label: "Doctor", icon: "󰒘", hint: "Alt+4" },
+                  { label: "Devices", icon: "󰒓", hint: "Alt+5" }
                 ]
                 delegate: Button {
                   required property int index
@@ -905,7 +1160,7 @@ Item {
               }
               Text {
                 Layout.fillWidth: true
-                text: "Alt+1–4    Pages\nTab         Controls\n↑↓ / j k   Navigate\nCtrl+Z      Undo setting\nEsc         Back"
+                text: "Alt+1–5    Pages\nTab         Controls\n↑↓ / j k   Navigate\nCtrl+Z      Undo setting\nEsc         Back"
                 color: root.mutedText
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -931,7 +1186,7 @@ Item {
                 Layout.fillWidth: true
                 spacing: Style.spacing.sm
                 Repeater {
-                  model: ["Overview", "Appearance", "Programs", "Doctor"]
+                  model: ["Overview", "Appearance", "Programs", "Doctor", "Devices"]
                   delegate: Button {
                     required property int index
                     required property string modelData
@@ -1437,20 +1692,20 @@ Item {
                         }
                         Button {
                           id: displayButton
-                          text: "Open controls"
+                          text: "Device details"
                           iconText: "󰁔"
                           bordered: true
                           focusable: true
                           enabled: root.appearance.display.state === "ok"
                           anchors.verticalCenter: parent.verticalCenter
-                          onClicked: root.requestAppearanceHandoff("display")
+                          onClicked: root.openDevicesCategory(0)
                         }
                       }
                     }
 
                     Text {
                       width: parent.width
-                      text: "Resolution, refresh rate, arrangement, and persistent monitor profiles remain planned for Devices."
+                      text: "Current modes and device-specific handoffs are available on the Devices page."
                       color: root.mutedText
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
@@ -1871,6 +2126,242 @@ Item {
                           onClicked: root.requestSelectedAction()
                         }
                         Text { Layout.fillWidth: true; text: "Doctor never requests privilege or applies treatment."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                      }
+                    }
+                  }
+                }
+
+                // -------------------------------------------------- Devices
+                ColumnLayout {
+                  spacing: Style.spacing.sm
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 0
+                      Text { text: "Devices"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                      Text { text: "Understand what is connected, then hand changes to the Omarchy tool that owns them."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                    }
+                    Button {
+                      iconText: "󰑐"
+                      iconSpinning: root.devicesLoading
+                      tooltipText: "Refresh (Ctrl+R)"
+                      onClicked: root.refreshDevices()
+                    }
+                  }
+
+                  Text {
+                    visible: root.devicesError !== "" || root.devices.errors.length > 0
+                    Layout.fillWidth: true
+                    text: root.devicesError !== "" ? root.devicesError
+                      : root.devices.errors.length + " device provider" + (root.devices.errors.length === 1 ? " is" : "s are") + " unavailable. Other device summaries still work."
+                    color: Color.urgent
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: Style.spacing.md
+
+                    Item {
+                      visible: !root.narrow || !root.detailOpen
+                      Layout.fillWidth: true
+                      Layout.fillHeight: true
+                      Layout.preferredWidth: Style.space(430)
+
+                      ListView {
+                        id: deviceList
+                        anchors.fill: parent
+                        clip: true
+                        spacing: Style.spacing.xs
+                        model: root.deviceCategories
+                        QQC.ScrollBar.vertical: PersistentScrollBar {
+                          id: deviceScrollbar
+                          parent: deviceList
+                          anchors.top: deviceList.top
+                          anchors.right: deviceList.right
+                          anchors.bottom: deviceList.bottom
+                        }
+                        delegate: CursorSurface {
+                          id: deviceDelegate
+                          required property int index
+                          required property var modelData
+                          width: deviceList.width - (deviceScrollbar.visible ? Style.space(12) : 0)
+                          height: Style.space(68)
+                          hasCursor: root.cursorActive && root.selectedDeviceIndex === index
+                          current: root.detailOpen && root.selectedDeviceIndex === index
+                          foreground: root.foreground
+                          accent: root.selectedText
+
+                          RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: Style.spacing.md
+                            anchors.rightMargin: Style.spacing.md
+                            spacing: Style.spacing.md
+                            Text { text: deviceDelegate.modelData.icon; color: root.deviceAvailable(deviceDelegate.modelData.id) ? root.selectedText : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconLarge }
+                            ColumnLayout {
+                              Layout.fillWidth: true
+                              spacing: 0
+                              Text { Layout.fillWidth: true; text: deviceDelegate.modelData.title; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
+                              Text { Layout.fillWidth: true; text: root.deviceSummary(deviceDelegate.modelData.id); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                            }
+                            Text { text: "󰁔"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconSmall }
+                          }
+
+                          MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onEntered: { root.cursorActive = true; root.selectedDeviceIndex = index }
+                            onClicked: { root.selectedDeviceIndex = index; root.detailOpen = true }
+                          }
+                        }
+                      }
+
+                      LoadingState {
+                        anchors.centerIn: parent
+                        visible: root.devicesLoading && root.devices.generatedAt === ""
+                        label: "Reading connected devices…"
+                      }
+                    }
+
+                    BorderSurface {
+                      visible: !root.narrow || root.detailOpen
+                      Layout.fillHeight: true
+                      Layout.preferredWidth: root.narrow ? -1 : Style.space(390)
+                      Layout.fillWidth: root.narrow
+                      color: Style.normalFillFor(root.foreground, Color.accent)
+                      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                      padding: Style.spacing.panelPadding
+
+                      QQC.ScrollView {
+                        id: deviceDetailScroll
+                        anchors.fill: parent
+                        anchors.margins: parent.contentLeftInset
+                        clip: true
+                        rightPadding: deviceDetailScrollbar.visible ? Style.space(16) : 0
+                        QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
+                        QQC.ScrollBar.vertical: PersistentScrollBar {
+                          id: deviceDetailScrollbar
+                          parent: deviceDetailScroll
+                          anchors.top: deviceDetailScroll.top
+                          anchors.right: deviceDetailScroll.right
+                          anchors.bottom: deviceDetailScroll.bottom
+                        }
+
+                        Column {
+                          width: deviceDetailScroll.availableWidth
+                          spacing: Style.spacing.md
+
+                          Button { visible: root.narrow; text: "Back to devices"; iconText: "󰁍"; onClicked: root.detailOpen = false }
+
+                          Row {
+                            width: parent.width
+                            spacing: Style.spacing.md
+                            Text { text: root.deviceCategories[root.selectedDeviceIndex].icon; color: root.deviceAvailable(root.deviceCategories[root.selectedDeviceIndex].id) ? root.selectedText : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.displayLarge }
+                            Column {
+                              width: parent.width - parent.children[0].width - parent.spacing
+                              spacing: Style.spacing.xs
+                              Text { text: root.deviceCategories[root.selectedDeviceIndex].title; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                              Text { width: parent.width; text: root.deviceCategories[root.selectedDeviceIndex].description; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                            }
+                          }
+
+                          PanelSeparator { width: parent.width; foreground: root.foreground }
+
+                          Column {
+                            visible: root.selectedDeviceIndex === 0
+                            width: parent.width
+                            spacing: Style.spacing.md
+                            Text { width: parent.width; text: Model.deviceDisplaySummary(root.devices.display); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WordWrap }
+                            Text { visible: root.devices.display.brightnessAvailable; text: root.devices.display.brightnessPercent + "% brightness"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                            Repeater {
+                              model: root.devices.display.displays
+                              delegate: BorderSurface {
+                                required property var modelData
+                                width: parent.width
+                                implicitHeight: monitorDetails.implicitHeight + Style.spacing.md * 2
+                                color: "transparent"
+                                borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                                padding: Style.spacing.md
+                                Column {
+                                  id: monitorDetails
+                                  anchors.left: parent.left
+                                  anchors.right: parent.right
+                                  anchors.top: parent.top
+                                  anchors.margins: parent.contentLeftInset
+                                  spacing: Style.spacing.xs
+                                  Text { width: parent.width; text: (modelData.label || modelData.name) + (modelData.focused ? " · Focused" : ""); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
+                                  Text { width: parent.width; text: modelData.enabled ? modelData.width + "×" + modelData.height + " @ " + Model.formatRefreshRate(modelData.refreshHz) : "Disabled"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                                  Text { visible: modelData.enabled; width: parent.width; text: "Scale " + modelData.scale + "× · Position " + modelData.x + ", " + modelData.y + " · " + modelData.name; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                                }
+                              }
+                            }
+                            Text { visible: root.devices.display.state !== "ok"; width: parent.width; text: "Display details are unavailable, but the Omarchy panel may still be opened."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                            Button { width: parent.width; text: "Open display controls"; iconText: "󰁔"; bordered: true; onClicked: root.requestDeviceHandoff("display") }
+                            Button { width: parent.width; text: "Edit monitor configuration"; iconText: "󰏫"; bordered: true; onClicked: root.requestDeviceHandoff("monitor-config") }
+                            Text { width: parent.width; text: "Resolution, refresh and arrangement stay read-only here. Safe graphical editing is planned with automatic rollback."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                          }
+
+                          Column {
+                            visible: root.selectedDeviceIndex === 1
+                            width: parent.width
+                            spacing: Style.spacing.md
+                            Text { width: parent.width; text: Model.audioSummary(root.audioSnapshot); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WordWrap }
+                            Text { width: parent.width; text: "Output: " + root.audioSnapshot.outputName + "\nVolume: " + root.audioSnapshot.outputVolume + "%" + (root.audioSnapshot.outputMuted ? " · Muted" : "") + "\n\nInput: " + root.audioSnapshot.inputName + "\nVolume: " + root.audioSnapshot.inputVolume + "%" + (root.audioSnapshot.inputMuted ? " · Muted" : ""); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                            Button { width: parent.width; text: "Open audio controls"; iconText: "󰁔"; bordered: true; onClicked: root.requestDeviceHandoff("audio") }
+                            Text { width: parent.width; text: "Volume, mute, default devices and the per-app mixer remain owned by Quattro."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                          }
+
+                          Column {
+                            visible: root.selectedDeviceIndex === 2
+                            width: parent.width
+                            spacing: Style.spacing.md
+                            Text { width: parent.width; text: Model.bluetoothSummary(root.bluetoothSnapshot); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WordWrap }
+                            Text { width: parent.width; text: root.bluetoothSnapshot.connectedNames.length > 0 ? root.bluetoothSnapshot.connectedNames.join("\n") : root.bluetoothSnapshot.powered ? "No devices are connected." : "Turn Bluetooth on from Quattro to discover devices."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                            Button { width: parent.width; text: "Open Bluetooth"; iconText: "󰁔"; bordered: true; onClicked: root.requestDeviceHandoff("bluetooth") }
+                            Text { width: parent.width; text: "Power, discovery, pairing and connection changes remain owned by Quattro."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                          }
+
+                          Column {
+                            visible: root.selectedDeviceIndex === 3
+                            width: parent.width
+                            spacing: Style.spacing.md
+                            Text { width: parent.width; text: Model.networkSummary(root.networkSnapshot); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WordWrap }
+                            Text { width: parent.width; text: "Type: " + (root.networkSnapshot.type === "wifi" ? "Wi-Fi" : root.networkSnapshot.type === "ethernet" ? "Ethernet" : "Disconnected") + (root.networkSnapshot.ssid ? "\nNetwork: " + root.networkSnapshot.ssid : "") + (root.networkSnapshot.signal !== null && root.networkSnapshot.type === "wifi" ? "\nSignal: " + root.networkSnapshot.signal + "%" : "") + (root.networkSnapshot.interface ? "\nInterface: " + root.networkSnapshot.interface : "") + (root.networkSnapshot.ip ? "\nLocal address: " + root.networkSnapshot.ip + (root.networkSnapshot.prefix ? "/" + root.networkSnapshot.prefix : "") : ""); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                            Button { width: parent.width; text: "Open network"; iconText: "󰁔"; bordered: true; onClicked: root.requestDeviceHandoff("network") }
+                            Text { width: parent.width; text: "Wi-Fi power, connection, passwords, DNS and sharing remain owned by Quattro and Omarchy."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                          }
+
+                          Column {
+                            visible: root.selectedDeviceIndex === 4
+                            width: parent.width
+                            spacing: Style.spacing.md
+                            Text { width: parent.width; text: Model.inputSummary(root.devices.input); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WordWrap }
+                            Text { width: parent.width; text: root.devices.input.mainKeyboard ? "Active layout: " + root.devices.input.mainKeyboard.keymap + "\nMain keyboard: " + root.devices.input.mainKeyboard.name : "No main keyboard was reported."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WrapAnywhere }
+                            Text { width: parent.width; text: root.devices.input.keyboards.length + " keyboard" + (root.devices.input.keyboards.length === 1 ? "" : "s") + " · " + root.devices.input.pointers.length + " pointer" + (root.devices.input.pointers.length === 1 ? "" : "s") + " · " + root.devices.input.touchscreens.length + " touchscreen" + (root.devices.input.touchscreens.length === 1 ? "" : "s") + " · " + root.devices.input.tablets.length + " tablet" + (root.devices.input.tablets.length === 1 ? "" : "s"); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                            Text { visible: root.devices.input.keyboards.length > 0; width: parent.width; text: "KEYBOARDS\n" + root.devices.input.keyboards.map(function(row) { return (row.main ? "• " : "  ") + row.name + " · " + row.keymap }).join("\n"); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                            Text { visible: root.devices.input.pointers.length > 0; width: parent.width; text: "POINTERS\n" + root.devices.input.pointers.map(function(row) { return "• " + row.name + " · speed " + row.speed + " · scroll " + row.scrollFactor }).join("\n"); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                            Text { visible: root.devices.input.touchscreens.length + root.devices.input.tablets.length > 0; width: parent.width; text: "TOUCH & TABLETS\n" + root.devices.input.touchscreens.concat(root.devices.input.tablets).map(function(row) { return "• " + row.name }).join("\n"); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                            Toggle {
+                              visible: root.devices.input.touchpad.present
+                              width: parent.width
+                              label: "Touchpad"
+                              description: root.devices.input.touchpad.name
+                              checked: root.devices.input.touchpad.enabled
+                              enabled: !root.devicesBusy
+                              foreground: root.foreground
+                              fontFamily: Style.font.family
+                              onClicked: root.requestTouchpad(!root.devices.input.touchpad.enabled, false)
+                            }
+                            Button { width: parent.width; text: "Edit input configuration"; iconText: "󰏫"; bordered: true; onClicked: root.requestDeviceHandoff("input-config") }
+                            Text { width: parent.width; text: "Only the canonical touchpad toggle is changed here. Keyboard, mouse and per-device configuration stay in Omarchy's input file."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                          }
+                        }
                       }
                     }
                   }

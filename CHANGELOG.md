@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0 - Unreleased
+
+- Added a responsive Devices page for Display, Audio, Bluetooth, Network, and
+  Input with the same keyboard/mouse cursor model as Programs and Doctor.
+- Added current monitor resolution, refresh rate, scale, position, focus,
+  enabled state, and brightness summaries without exposing display serials.
+- Added live PipeWire, Bluetooth, and NetworkManager summaries through the same
+  Quickshell services used by Quattro's native panels.
+- Added keyboard, pointer, touchpad, touchscreen, and tablet inventory without
+  exposing hardware addresses.
+- Added allowlisted handoffs to Quattro's Display, Audio, Bluetooth, and
+  Network panels and Omarchy's monitor/input configuration editors.
+- Added a canonical touchpad on/off control with desired-state verification and
+  eight-second undo; no other device configuration is written by OmaPanel.
+- Added timeout-bounded, failure-isolated device providers and fixture/model
+  coverage for discovery, privacy, handoffs, validation, and undo state.
+- Moved safe graphical monitor editing to the v0.7 roadmap, requiring a
+  supervised 15-second automatic rollback before persistent changes.
+
 ## 0.3.0 - 2026-08-24
 
 - Added a theme-native Appearance page and remapped navigation to Overview,

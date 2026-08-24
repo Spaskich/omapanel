@@ -7,6 +7,7 @@ PROGRAM_SCHEMA_VERSION=1
 DOCTOR_SCHEMA_VERSION=2
 DOCTOR_REPORT_SCHEMA_VERSION=1
 APPEARANCE_SCHEMA_VERSION=1
+DEVICE_SCHEMA_VERSION=1
 CHECK_TIMEOUT="${OMAPANEL_CHECK_TIMEOUT:-3}"
 [[ $CHECK_TIMEOUT =~ ^[0-9]+([.][0-9]+)?$ ]] || CHECK_TIMEOUT=3
 OMAPANEL_VERSION="$(jq -r '.version // "unknown"' "$ROOT/manifest.json" 2>/dev/null || printf unknown)"
@@ -19,8 +20,11 @@ Usage:
   omapanel-backend collect doctor
   omapanel-backend collect health
   omapanel-backend collect appearance
+  omapanel-backend collect devices
   omapanel-backend appearance set <font|text-size|bar-position|bar-transparency|bar-visible> <value>
   omapanel-backend appearance handoff <theme|background|unlock|font-install|display>
+  omapanel-backend devices set touchpad <true|false>
+  omapanel-backend devices handoff <display|audio|bluetooth|network|monitor-config|input-config>
   omapanel-backend doctor [--json] [--copy | --output <path>]
   omapanel-backend action [--dry-run] <adapter> <target>
 EOF
@@ -451,6 +455,188 @@ timed_capture() {
   set -e
   printf -v "$variable" '%s' "$output"
   return "$rc"
+}
+
+device_error_json() {
+  jq -cn --arg provider "$1" --arg message "$2" \
+    '{provider:$provider,message:$message}'
+}
+
+collect_devices() {
+  local display_state=unavailable display_output="" monitor_output="" displays_json='[]'
+  local brightness_available=false brightness_percent=0 focused_monitor=""
+  local input_state=unavailable input_output="" keyboards_json='[]' pointers_json='[]'
+  local tablets_json='[]' touchscreens_json='[]' switches_json='[]' main_keyboard_json='null'
+  local touchpad_name="" touchpad_present=false touchpad_enabled=false
+  local network_state=unavailable network_output="" network_verbose=""
+  local network_type=disconnected network_interface="" network_ssid="" network_signal=""
+  local network_ip="" network_prefix=""
+  local touchpad_flag="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/hypr/touchpad-disabled.lua"
+  local key value
+  local -a device_errors=()
+
+  if command -v hyprctl >/dev/null 2>&1 && timed_capture display_output hyprctl monitors all -j &&
+    jq -e 'type == "array" and all(.[]; (.name | type == "string"))' <<<"$display_output" >/dev/null 2>&1; then
+    displays_json="$(jq -c '
+      map({
+        name:(.name // ""),
+        label:(if (.model // "") != "" then .model else (.description // .name // "Display") end),
+        make:(.make // ""), model:(.model // ""),
+        enabled:(.disabled != true), focused:(.focused == true),
+        width:((.width // 0) | tonumber), height:((.height // 0) | tonumber),
+        refreshHz:((((.refreshRate // 0) | tonumber) * 100 | round) / 100),
+        x:((.x // 0) | tonumber), y:((.y // 0) | tonumber),
+        scale:((.scale // 1) | tonumber), transform:((.transform // 0) | tonumber)
+      })
+    ' <<<"$display_output")"
+    focused_monitor="$(jq -r '[.[] | select(.focused)][0].name // ""' <<<"$displays_json")"
+    display_state=ok
+  else
+    device_errors+=("$(device_error_json display 'Display details could not be read from Hyprland.')")
+  fi
+
+  if command -v omarchy >/dev/null 2>&1 && timed_capture monitor_output omarchy monitor state; then
+    value="$(sed -n '1p' <<<"$monitor_output")"
+    if [[ $value =~ ^[0-9]+$ ]] && (( value >= 0 && value <= 100 )); then
+      brightness_available=true
+      brightness_percent="$value"
+    fi
+  else
+    device_errors+=("$(device_error_json brightness 'Display brightness information is unavailable.')")
+  fi
+
+  if command -v hyprctl >/dev/null 2>&1 && timed_capture input_output hyprctl devices -j &&
+    jq -e 'type == "object" and (.keyboards | type == "array") and (.mice | type == "array")' \
+      <<<"$input_output" >/dev/null 2>&1; then
+    keyboards_json="$(jq -c '[.keyboards[]? | {
+      name:(.name // "Keyboard"), main:(.main == true), keymap:(.active_keymap // "Unknown")
+    }]' <<<"$input_output")"
+    main_keyboard_json="$(jq -c '[.keyboards[]? | select(.main == true)][0] // .keyboards[0] // null |
+      if . == null then null else {name:(.name // "Keyboard"),main:(.main == true),keymap:(.active_keymap // "Unknown")} end' \
+      <<<"$input_output")"
+    pointers_json="$(jq -c '[.mice[]? | {
+      name:(.name // "Pointer"),
+      kind:(if ((.name // "") | test("touchpad|trackpad"; "i")) then "touchpad" else "mouse" end),
+      speed:((.defaultSpeed // 0) | tonumber), scrollFactor:((.scrollFactor // 1) | tonumber)
+    }]' <<<"$input_output")"
+    tablets_json="$(jq -c '[.tablets[]? | {name:(.name // "Tablet")}]' <<<"$input_output")"
+    touchscreens_json="$(jq -c '[.touch[]? | {name:(.name // "Touchscreen")}]' <<<"$input_output")"
+    switches_json="$(jq -c '[.switches[]? | {name:(.name // "Switch")}]' <<<"$input_output")"
+    touchpad_name="$(jq -r '[.[] | select(.kind == "touchpad")][0].name // ""' <<<"$pointers_json")"
+    if command -v omarchy >/dev/null 2>&1 && timed_capture value omarchy hw touchpad && [[ -n $value ]]; then
+      touchpad_name="$value"
+    fi
+    if [[ -n $touchpad_name ]]; then
+      touchpad_present=true
+      [[ ! -e $touchpad_flag ]] && touchpad_enabled=true
+    fi
+    input_state=ok
+  else
+    device_errors+=("$(device_error_json input 'Input devices could not be read from Hyprland.')")
+  fi
+
+  if command -v omarchy >/dev/null 2>&1 && timed_capture network_output omarchy network status; then
+    IFS=$'\t' read -r network_type value network_signal _ <<<"$network_output"
+    case "$network_type" in
+      wifi) network_ssid="$value" ;;
+      ethernet) network_interface="$value" ;;
+      disconnected) ;;
+      *) network_type=unknown ;;
+    esac
+    network_state=ok
+
+    if [[ $network_type != disconnected ]] && timed_capture network_verbose omarchy network status --verbose; then
+      while IFS=$'\t' read -r key value; do
+        case "$key" in
+          iface) network_interface="$value" ;;
+          ip) network_ip="$value" ;;
+          prefix) network_prefix="$value" ;;
+          ssid) [[ -n $value ]] && network_ssid="$value" ;;
+        esac
+      done <<<"$network_verbose"
+    fi
+  else
+    device_errors+=("$(device_error_json network 'Network details could not be read from Omarchy.')")
+  fi
+
+  [[ $network_type =~ ^(wifi|ethernet|disconnected|unknown)$ ]] || network_type=unknown
+  [[ $network_interface =~ ^[A-Za-z0-9_.:-]{0,64}$ ]] || network_interface=""
+  [[ $network_ip =~ ^[A-Fa-f0-9:.]{0,64}$ ]] || network_ip=""
+  [[ $network_prefix =~ ^[0-9]{0,3}$ ]] || network_prefix=""
+  [[ $network_signal =~ ^[0-9]{0,3}$ ]] || network_signal=""
+  network_ssid="${network_ssid//$'\n'/ }"
+  network_ssid="${network_ssid//$'\r'/ }"
+  (( ${#network_ssid} <= 128 )) || network_ssid="${network_ssid:0:128}"
+
+  jq -cn \
+    --argjson schemaVersion "$DEVICE_SCHEMA_VERSION" --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg displayState "$display_state" --arg focusedMonitor "$focused_monitor" \
+    --argjson brightnessAvailable "$brightness_available" --argjson brightnessPercent "$brightness_percent" \
+    --argjson displays "$displays_json" \
+    --arg inputState "$input_state" --argjson mainKeyboard "$main_keyboard_json" \
+    --argjson keyboards "$keyboards_json" --argjson pointers "$pointers_json" \
+    --argjson tablets "$tablets_json" --argjson touchscreens "$touchscreens_json" --argjson switches "$switches_json" \
+    --argjson touchpadPresent "$touchpad_present" --arg touchpadName "$touchpad_name" --argjson touchpadEnabled "$touchpad_enabled" \
+    --arg networkState "$network_state" --arg networkType "$network_type" --arg networkInterface "$network_interface" \
+    --arg networkSsid "$network_ssid" --arg networkSignal "$network_signal" --arg networkIp "$network_ip" --arg networkPrefix "$network_prefix" \
+    --argjson errors "$(json_lines_to_array "${device_errors[@]}")" \
+    '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,
+      display:{state:$displayState,focusedMonitor:$focusedMonitor,brightnessAvailable:$brightnessAvailable,
+        brightnessPercent:$brightnessPercent,displays:$displays},
+      input:{state:$inputState,mainKeyboard:$mainKeyboard,keyboards:$keyboards,pointers:$pointers,
+        tablets:$tablets,touchscreens:$touchscreens,switches:$switches,
+        touchpad:{present:$touchpadPresent,name:$touchpadName,enabled:$touchpadEnabled}},
+      network:{state:$networkState,type:$networkType,interface:$networkInterface,ssid:$networkSsid,
+        signal:($networkSignal | if . == "" then null else tonumber end),ip:$networkIp,prefix:$networkPrefix},
+      errors:$errors}'
+}
+
+device_result() {
+  jq -cn --arg setting "$1" --argjson value "$2" --argjson previous "$3" --arg message "$4" \
+    '{schemaVersion:1,ok:true,setting:$setting,value:$value,previous:$previous,message:$message}'
+}
+
+devices_set() {
+  local setting="$1" value="$2" touchpad_name="" current=true requested action
+  local touchpad_flag="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/hypr/touchpad-disabled.lua"
+  [[ $setting == touchpad ]] || { echo "Unknown device setting: $setting" >&2; return 2; }
+  [[ $value =~ ^(true|false)$ ]] || { echo 'Touchpad state must be true or false.' >&2; return 2; }
+  command -v omarchy >/dev/null 2>&1 || { echo 'The Omarchy command is unavailable.' >&2; return 1; }
+  timed_capture touchpad_name omarchy hw touchpad || true
+  [[ -n $touchpad_name ]] || { echo 'No touchpad was detected.' >&2; return 1; }
+
+  [[ -e $touchpad_flag ]] && current=false
+  requested="$value"
+  if [[ $current != "$requested" ]]; then
+    [[ $requested == true ]] && action=on || action=off
+    omarchy toggle touchpad "$action" >/dev/null
+  fi
+  if { [[ $requested == true ]] && [[ -e $touchpad_flag ]]; } ||
+    { [[ $requested == false ]] && [[ ! -e $touchpad_flag ]]; }; then
+    echo 'Omarchy did not apply the requested touchpad state.' >&2
+    return 1
+  fi
+  device_result touchpad "$requested" "$current" "Touchpad turned $([[ $requested == true ]] && printf on || printf off)."
+}
+
+devices_handoff() {
+  local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  command -v omarchy >/dev/null 2>&1 || { echo 'The Omarchy command is unavailable.' >&2; return 1; }
+  case "$1" in
+    display) exec omarchy shell omarchy.monitor show ;;
+    audio) exec omarchy shell omarchy.audio show ;;
+    bluetooth) exec omarchy shell omarchy.bluetooth show ;;
+    network) exec omarchy shell omarchy.network show ;;
+    monitor-config)
+      [[ -f $config_home/hypr/monitors.lua ]] || { echo 'The Omarchy monitor configuration is unavailable.' >&2; return 1; }
+      exec omarchy launch config editor "$config_home/hypr/monitors.lua"
+      ;;
+    input-config)
+      [[ -f $config_home/hypr/input.lua ]] || { echo 'The Omarchy input configuration is unavailable.' >&2; return 1; }
+      exec omarchy launch config editor "$config_home/hypr/input.lua"
+      ;;
+    *) echo "Unknown device handoff: $1" >&2; return 2 ;;
+  esac
 }
 
 appearance_error_json() {
@@ -1446,6 +1632,23 @@ main() {
         appearance)
           [[ -z ${3:-} ]] || { usage; exit 2; }
           collect_appearance
+          ;;
+        devices)
+          [[ -z ${3:-} ]] || { usage; exit 2; }
+          collect_devices
+          ;;
+        *) usage; exit 2 ;;
+      esac
+      ;;
+    devices)
+      case "${2:-}" in
+        set)
+          [[ $# == 4 ]] || { usage; exit 2; }
+          devices_set "$3" "$4"
+          ;;
+        handoff)
+          [[ $# == 3 ]] || { usage; exit 2; }
+          devices_handoff "$3"
           ;;
         *) usage; exit 2 ;;
       esac

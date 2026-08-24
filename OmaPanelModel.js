@@ -97,6 +97,158 @@ function displaySummary(display) {
   return output
 }
 
+function emptyDevices() {
+  return {
+    generatedAt: "",
+    display: { state: "unavailable", focusedMonitor: "", brightnessAvailable: false, brightnessPercent: 0, displays: [] },
+    input: {
+      state: "unavailable", mainKeyboard: null, keyboards: [], pointers: [], tablets: [], touchscreens: [], switches: [],
+      touchpad: { present: false, name: "", enabled: false }
+    },
+    network: { state: "unavailable", type: "unknown", interface: "", ssid: "", signal: null, ip: "", prefix: "" },
+    errors: []
+  }
+}
+
+function normalizeDevices(payload) {
+  if (!payload || Number(payload.schemaVersion) !== 1) return null
+  var base = emptyDevices()
+  var display = payload.display || {}
+  var input = payload.input || {}
+  var touchpad = input.touchpad || {}
+  var network = payload.network || {}
+
+  base.generatedAt = String(payload.generatedAt || "")
+  base.display = {
+    state: String(display.state || "unavailable"),
+    focusedMonitor: String(display.focusedMonitor || ""),
+    brightnessAvailable: display.brightnessAvailable === true,
+    brightnessPercent: Number(display.brightnessPercent) || 0,
+    displays: Array.isArray(display.displays) ? display.displays : []
+  }
+  base.input = {
+    state: String(input.state || "unavailable"),
+    mainKeyboard: input.mainKeyboard && typeof input.mainKeyboard === "object" ? input.mainKeyboard : null,
+    keyboards: Array.isArray(input.keyboards) ? input.keyboards : [],
+    pointers: Array.isArray(input.pointers) ? input.pointers : [],
+    tablets: Array.isArray(input.tablets) ? input.tablets : [],
+    touchscreens: Array.isArray(input.touchscreens) ? input.touchscreens : [],
+    switches: Array.isArray(input.switches) ? input.switches : [],
+    touchpad: {
+      present: touchpad.present === true,
+      name: String(touchpad.name || ""),
+      enabled: touchpad.enabled === true
+    }
+  }
+  base.network = {
+    state: String(network.state || "unavailable"),
+    type: String(network.type || "unknown"),
+    interface: String(network.interface || ""),
+    ssid: String(network.ssid || ""),
+    signal: network.signal === null || network.signal === undefined ? null : Number(network.signal),
+    ip: String(network.ip || ""),
+    prefix: String(network.prefix || "")
+  }
+  base.errors = Array.isArray(payload.errors) ? payload.errors : []
+  return base
+}
+
+function formatRefreshRate(value) {
+  var hz = Number(value) || 0
+  if (hz <= 0) return "Unknown refresh rate"
+  var rounded = Math.round(hz * 100) / 100
+  return String(rounded).replace(/\.0+$/, "") + " Hz"
+}
+
+function deviceDisplaySummary(display) {
+  var state = display || {}
+  if (state.state !== "ok") return "Display details unavailable"
+  var records = Array.isArray(state.displays) ? state.displays : []
+  var enabled = records.filter(function(row) { return row && row.enabled !== false }).length
+  var focused = records.filter(function(row) { return row && row.focused === true })[0]
+  var result = enabled + " active display" + (enabled === 1 ? "" : "s")
+  if (focused && Number(focused.width) > 0 && Number(focused.height) > 0)
+    result += " · " + Number(focused.width) + "×" + Number(focused.height)
+  if (focused && Number(focused.refreshHz) > 0) result += " @ " + formatRefreshRate(focused.refreshHz)
+  return result
+}
+
+function inputSummary(input) {
+  var state = input || {}
+  if (state.state !== "ok") return "Input details unavailable"
+  var keyboard = state.mainKeyboard || null
+  var parts = []
+  if (keyboard && keyboard.keymap) parts.push(String(keyboard.keymap))
+  var pointers = Array.isArray(state.pointers) ? state.pointers : []
+  var mouseCount = pointers.filter(function(row) { return row && row.kind !== "touchpad" }).length
+  if (mouseCount > 0) parts.push(mouseCount + " pointer" + (mouseCount === 1 ? "" : "s"))
+  if (state.touchpad && state.touchpad.present) parts.push(state.touchpad.enabled ? "Touchpad on" : "Touchpad off")
+  return parts.length > 0 ? parts.join(" · ") : "No input devices reported"
+}
+
+function normalizeAudioSnapshot(snapshot) {
+  var state = snapshot || {}
+  var outputVolume = Number(state.outputVolume) || 0
+  var inputVolume = Number(state.inputVolume) || 0
+  return {
+    state: String(state.state || "unavailable"),
+    outputName: String(state.outputName || "No output"),
+    inputName: String(state.inputName || "No input"),
+    outputVolume: Math.max(0, Math.round(outputVolume <= 1 ? outputVolume * 100 : outputVolume)),
+    outputMuted: state.outputMuted === true,
+    inputVolume: Math.max(0, Math.round(inputVolume <= 1 ? inputVolume * 100 : inputVolume)),
+    inputMuted: state.inputMuted === true
+  }
+}
+
+function audioSummary(audio) {
+  var state = normalizeAudioSnapshot(audio)
+  if (state.state !== "ok") return "Audio service unavailable"
+  return state.outputName + " · " + (state.outputMuted ? "Muted" : state.outputVolume + "%")
+}
+
+function normalizeBluetoothSnapshot(snapshot) {
+  var state = snapshot || {}
+  return {
+    state: String(state.state || "unavailable"),
+    powered: state.powered === true,
+    connectedNames: Array.isArray(state.connectedNames) ? state.connectedNames.map(function(value) { return String(value) }) : []
+  }
+}
+
+function bluetoothSummary(bluetooth) {
+  var state = normalizeBluetoothSnapshot(bluetooth)
+  if (state.state !== "ok") return "Bluetooth unavailable"
+  if (!state.powered) return "Bluetooth off"
+  var count = state.connectedNames.length
+  return count === 0 ? "On · No connected devices" : count + " connected · " + state.connectedNames.join(", ")
+}
+
+function normalizeNetworkSnapshot(snapshot) {
+  var state = snapshot || {}
+  var details = state.details || {}
+  var type = String(state.type || details.type || "unknown")
+  return {
+    state: String(state.state || details.state || "unavailable"),
+    type: type,
+    wifiEnabled: state.wifiEnabled !== false,
+    ssid: String(state.ssid || details.ssid || ""),
+    signal: state.signal === null || state.signal === undefined ? details.signal : Number(state.signal),
+    interface: String(state.interface || details.interface || ""),
+    ip: String(state.ip || details.ip || ""),
+    prefix: String(state.prefix || details.prefix || "")
+  }
+}
+
+function networkSummary(network) {
+  var state = normalizeNetworkSnapshot(network)
+  if (state.state !== "ok") return "Network service unavailable"
+  if (state.type === "disconnected") return state.wifiEnabled ? "Disconnected" : "Wi-Fi off"
+  var name = state.type === "wifi" ? (state.ssid || "Wi-Fi") : "Ethernet"
+  if (state.ip) name += " · " + state.ip + (state.prefix ? "/" + state.prefix : "")
+  return name
+}
+
 function filterPrograms(programs, query, filter, showAdvanced) {
   var source = Array.isArray(programs) ? programs : []
   var needle = normalized(query)

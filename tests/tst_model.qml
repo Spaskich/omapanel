@@ -40,6 +40,44 @@ TestCase {
     compare(Model.normalizeAppearance({schemaVersion: 2}), null)
   }
 
+  function test_devices() {
+    var state = Model.normalizeDevices({
+      schemaVersion: 1,
+      generatedAt: "now",
+      display: {
+        state: "ok", focusedMonitor: "DP-1", brightnessAvailable: true, brightnessPercent: 55,
+        displays: [{name:"DP-1",label:"Desk 27",enabled:true,focused:true,width:2560,height:1440,refreshHz:143.998,x:0,y:0,scale:1,transform:0}]
+      },
+      input: {
+        state: "ok", mainKeyboard: {name:"keyboard",keymap:"English (US)",main:true},
+        keyboards: [{name:"keyboard"}], pointers: [{name:"mouse",kind:"mouse"}], tablets: [], touchscreens: [], switches: [],
+        touchpad: {present:true,name:"touchpad",enabled:false}
+      },
+      network: {state:"ok",type:"wifi",interface:"wlan0",ssid:"Home",signal:73,ip:"192.0.2.24",prefix:"24"},
+      errors: []
+    })
+    verify(state !== null)
+    compare(Model.deviceDisplaySummary(state.display), "1 active display · 2560×1440 @ 144 Hz")
+    compare(Model.inputSummary(state.input), "English (US) · 1 pointer · Touchpad off")
+    compare(Model.formatRefreshRate(59.951), "59.95 Hz")
+    compare(Model.normalizeDevices({schemaVersion: 2}), null)
+  }
+
+  function test_live_device_summaries() {
+    var audio = Model.normalizeAudioSnapshot({state:"ok",outputName:"Speakers",outputVolume:0.42,outputMuted:false,inputName:"Microphone",inputVolume:0.8,inputMuted:true})
+    compare(Model.audioSummary(audio), "Speakers · 42%")
+    compare(audio.inputVolume, 80)
+    compare(Model.audioSummary({state:"unavailable"}), "Audio service unavailable")
+
+    var bluetooth = Model.normalizeBluetoothSnapshot({state:"ok",powered:true,connectedNames:["Headphones"]})
+    compare(Model.bluetoothSummary(bluetooth), "1 connected · Headphones")
+    compare(Model.bluetoothSummary({state:"ok",powered:false}), "Bluetooth off")
+
+    var network = Model.normalizeNetworkSnapshot({state:"ok",type:"wifi",ssid:"Home",signal:75,wifiEnabled:true,details:{interface:"wlan0",ip:"192.0.2.24",prefix:"24"}})
+    compare(Model.networkSummary(network), "Home · 192.0.2.24/24")
+    compare(Model.networkSummary({state:"ok",type:"disconnected",wifiEnabled:false}), "Wi-Fi off")
+  }
+
   function test_doctor_filtering() {
     var checks = [
       { category: "Omarchy", status: "ok" },
