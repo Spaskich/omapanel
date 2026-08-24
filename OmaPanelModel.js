@@ -153,6 +153,129 @@ function normalizeDevices(payload) {
   return base
 }
 
+function emptyStorage() {
+  return {
+    generatedAt: "",
+    providers: { blockDevices: "unavailable", filesystems: "unavailable", health: "unavailable" },
+    drives: [], filesystems: [],
+    maintenance: {
+      packageCache: { state: "unavailable", path: "", totalBytes: 0, fileCount: 0, partial: false,
+        prune: { state: "unavailable", policy: "Keep two cached versions", candidateBytes: 0, candidateCount: 0 } },
+      orphans: { state: "unavailable", count: 0, packages: [] },
+      journal: { state: "unavailable", totalBytes: 0, display: "" },
+      userCache: { state: "unavailable", path: "", totalBytes: 0 }
+    },
+    snapshots: { state: "unavailable", scopes: [], snapshotCount: 0 },
+    errors: []
+  }
+}
+
+function normalizeStorage(payload) {
+  if (!payload || Number(payload.schemaVersion) !== 1) return null
+  var base = emptyStorage()
+  var providers = payload.providers || {}
+  var maintenance = payload.maintenance || {}
+  var packageCache = maintenance.packageCache || {}
+  var prune = packageCache.prune || {}
+  var orphans = maintenance.orphans || {}
+  var journal = maintenance.journal || {}
+  var userCache = maintenance.userCache || {}
+  var snapshots = payload.snapshots || {}
+
+  base.generatedAt = String(payload.generatedAt || "")
+  base.providers = {
+    blockDevices: String(providers.blockDevices || "unavailable"),
+    filesystems: String(providers.filesystems || "unavailable"),
+    health: String(providers.health || "unavailable")
+  }
+  base.drives = Array.isArray(payload.drives) ? payload.drives : []
+  base.filesystems = Array.isArray(payload.filesystems) ? payload.filesystems : []
+  base.maintenance.packageCache = {
+    state: String(packageCache.state || "unavailable"), path: String(packageCache.path || ""),
+    totalBytes: Number(packageCache.totalBytes) || 0, fileCount: Number(packageCache.fileCount) || 0,
+    partial: packageCache.partial === true,
+    prune: {
+      state: String(prune.state || "unavailable"), policy: String(prune.policy || "Keep two cached versions"),
+      candidateBytes: Number(prune.candidateBytes) || 0, candidateCount: Number(prune.candidateCount) || 0
+    }
+  }
+  base.maintenance.orphans = {
+    state: String(orphans.state || "unavailable"), count: Number(orphans.count) || 0,
+    packages: Array.isArray(orphans.packages) ? orphans.packages.map(function(value) { return String(value) }) : []
+  }
+  base.maintenance.journal = {
+    state: String(journal.state || "unavailable"), totalBytes: Number(journal.totalBytes) || 0,
+    display: String(journal.display || "")
+  }
+  base.maintenance.userCache = {
+    state: String(userCache.state || "unavailable"), path: String(userCache.path || ""),
+    totalBytes: Number(userCache.totalBytes) || 0
+  }
+  base.snapshots = {
+    state: String(snapshots.state || "unavailable"),
+    scopes: Array.isArray(snapshots.scopes) ? snapshots.scopes : [],
+    snapshotCount: Number(snapshots.snapshotCount) || 0
+  }
+  base.errors = Array.isArray(payload.errors) ? payload.errors : []
+  return base
+}
+
+function formatBytes(value) {
+  var bytes = Math.max(0, Number(value) || 0)
+  var units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+  var index = 0
+  while (bytes >= 1024 && index < units.length - 1) { bytes /= 1024; index++ }
+  var precision = index === 0 ? 0 : bytes >= 100 ? 0 : bytes >= 10 ? 1 : 2
+  return bytes.toFixed(precision).replace(/(\.[0-9]*?)0+$/, "$1").replace(/\.$/, "") + " " + units[index]
+}
+
+function storageHealthLabel(health) {
+  var state = String((health || {}).state || "unavailable")
+  if (state === "healthy") return "Healthy"
+  if (state === "warning") return "Warning"
+  if (state === "critical") return "Critical warning"
+  if (state === "unsupported") return "Health unsupported"
+  return "Health unavailable"
+}
+
+function storageHealthUpdatedLabel(epoch) {
+  var timestamp = Number(epoch) || 0
+  if (timestamp <= 0) return ""
+  var age = Math.max(0, Math.round(Date.now() / 1000 - timestamp))
+  if (age < 120) return "Health updated just now"
+  if (age < 7200) return "Health updated " + Math.round(age / 60) + " minutes ago"
+  if (age < 172800) return "Health updated " + Math.round(age / 3600) + " hours ago"
+  return "Health updated " + Math.round(age / 86400) + " days ago"
+}
+
+function storageCategorySummary(storage, id) {
+  var state = storage || emptyStorage()
+  if (id === "drives") {
+    return state.drives.length + " drive" + (state.drives.length === 1 ? "" : "s")
+      + " · " + state.filesystems.length + " mounted filesystem" + (state.filesystems.length === 1 ? "" : "s")
+  }
+  if (id === "space") return "Scan Home or choose a folder"
+  if (id === "maintenance") {
+    var cache = state.maintenance.packageCache
+    return formatBytes(cache.totalBytes) + " package cache · " + state.maintenance.orphans.count + " orphan"
+      + (state.maintenance.orphans.count === 1 ? "" : "s")
+  }
+  if (id === "snapshots") {
+    return state.snapshots.snapshotCount + " readable snapshot" + (state.snapshots.snapshotCount === 1 ? "" : "s")
+      + " · " + state.snapshots.scopes.length + " scope" + (state.snapshots.scopes.length === 1 ? "" : "s")
+  }
+  return "Unavailable"
+}
+
+function sortStorageEntries(entries) {
+  var source = Array.isArray(entries) ? entries.slice() : []
+  source.sort(function(a, b) {
+    var sizeDifference = (Number(b.sizeBytes) || 0) - (Number(a.sizeBytes) || 0)
+    return sizeDifference !== 0 ? sizeDifference : normalized(a.name).localeCompare(normalized(b.name))
+  })
+  return source
+}
+
 function formatRefreshRate(value) {
   var hz = Number(value) || 0
   if (hz <= 0) return "Unknown refresh rate"

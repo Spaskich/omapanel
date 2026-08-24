@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0 - 2026-08-24
+
+- Added a sixth Storage page for physical drives, deduplicated mounted
+  filesystems, encrypted-device state, capacity, and usage.
+- Added privacy-conscious NVMe health through UDisks2, including critical
+  warnings, temperature, power-on hours, self-test status, and update time
+  without serial, UUID, WWN, or EUI values.
+- Added explicit Home and directory-picker scans with progressive JSONL
+  results, same-filesystem boundaries, drill-down history, cancellation, and
+  default file-manager handoff. Scans never run automatically.
+- Added package-cache totals and canonical keep-two prune candidates, orphan
+  review, journal size, and user-cache size without direct deletion controls.
+- Added configured Snapper scopes and snapshot browsing when readable, with an
+  honest permission-limited state when unprivileged access is denied.
+- Added confirmed handoffs to package-cache pruning, orphan review, snapshot
+  creation/restoration, and Quattro's native disk-speed-test panel.
+- Added a horizontally scrollable six-page tab strip for narrow windows and
+  `Alt+6` keyboard access to Storage.
+- Added failure-isolated fixtures and model coverage for Btrfs deduplication,
+  SMART privacy, partial capability states, scans, cancellation, snapshots,
+  folder routing, and maintenance previews.
+
 ## 0.4.0 - 2026-08-24
 
 - Added a responsive Devices page for Display, Audio, Bluetooth, Network, and

@@ -31,6 +31,10 @@ Quickshell device services ── live audio/Bluetooth/network ├─ Devices ca
 touchpad desired state ── canonical Omarchy command ───────┘
 device/config request ── fixed allowlist ── existing Quattro/editor surface
 
+backend collect storage ── drives/filesystems/UDisks2 ── Storage categories
+storage scan <path> ── cancellable JSONL stream ── drill-down space model
+maintenance/recovery request ── preview ── fixed Omarchy/Quattro handoff
+
 selected action ── dry-run validation ── confirmation ── validated adapter
                                                     └─ existing Omarchy workflow
 ```
@@ -66,10 +70,14 @@ scripts/omapanel-backend collect doctor
 scripts/omapanel-backend collect health
 scripts/omapanel-backend collect appearance
 scripts/omapanel-backend collect devices
+scripts/omapanel-backend collect storage
 scripts/omapanel-backend appearance set <setting> <value>
 scripts/omapanel-backend appearance handoff <theme|background|unlock|font-install|display>
 scripts/omapanel-backend devices set touchpad <true|false>
 scripts/omapanel-backend devices handoff <display|audio|bluetooth|network|monitor-config|input-config>
+scripts/omapanel-backend storage scan <absolute-directory>
+scripts/omapanel-backend storage choose-directory
+scripts/omapanel-backend storage open <absolute-directory>
 scripts/omapanel-backend doctor [--json] [--copy | --output <path>]
 scripts/omapanel-backend action --dry-run <adapter> <target>
 scripts/omapanel-backend action <adapter> <target>
@@ -85,7 +93,8 @@ the only adapters that invoke `bash -lc`; their content contains no user data.
 
 Supported adapters are package, webapp, TUI, plugin, Flatpak, local launcher,
 update/restart review, restart shell, user/system journal, Hyprland editor,
-snapshot create/restore, orphan review, and sanitized report copy. Doctor only
+snapshot create/restore, orphan review, package-cache prune, disk speed test,
+and sanitized report copy. Doctor only
 offers adapters that open a reviewable handoff; it does not expose immediate
 treatment as a diagnostic action.
 
@@ -109,6 +118,26 @@ state, serializes UI writes, and exposes the previous value for eight seconds.
 All other device buttons are fixed handoffs. Monitor configuration remains
 read-only until an external guardian can restore runtime and persistent state
 independently of the panel process.
+
+Storage uses an internal `schemaVersion: 1` document. `lsblk` and `findmnt`
+provide physical and mounted topology; repeated Btrfs subvolumes sharing the
+same source and capacity collapse into one filesystem record. UDisks2 exposes
+read-only NVMe health. The projection never includes serials, UUIDs, WWNs, or
+other stable hardware identifiers.
+
+Folder scans are a separate JSONL contract with `started`, `entry`,
+`completed`, `cancelled`, and `error` events. Paths must resolve to absolute,
+readable directories. GNU `du` stays on one filesystem, does not follow
+symlinks, and is terminated with the backend when cancelled. Scan state is not
+persisted. Opening a result uses the desktop's default file handler and grants
+no file mutation capability.
+
+Maintenance collection is read-only. The package-cache preview runs the dry
+form of the same keep-two policy used by `omarchy update pkg prune`; orphan
+review uses Pacman's dependency query. Snapper scopes are listed without
+privilege, and permission denial is a first-class capability state. Cache
+prune, orphan review, snapshot create/restore, and disk speed testing are
+allowlisted previews that hand execution to their existing owner.
 
 ## Terminal and report boundary
 

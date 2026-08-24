@@ -8,6 +8,7 @@ DOCTOR_SCHEMA_VERSION=2
 DOCTOR_REPORT_SCHEMA_VERSION=1
 APPEARANCE_SCHEMA_VERSION=1
 DEVICE_SCHEMA_VERSION=1
+STORAGE_SCHEMA_VERSION=1
 CHECK_TIMEOUT="${OMAPANEL_CHECK_TIMEOUT:-3}"
 [[ $CHECK_TIMEOUT =~ ^[0-9]+([.][0-9]+)?$ ]] || CHECK_TIMEOUT=3
 OMAPANEL_VERSION="$(jq -r '.version // "unknown"' "$ROOT/manifest.json" 2>/dev/null || printf unknown)"
@@ -21,10 +22,14 @@ Usage:
   omapanel-backend collect health
   omapanel-backend collect appearance
   omapanel-backend collect devices
+  omapanel-backend collect storage
   omapanel-backend appearance set <font|text-size|bar-position|bar-transparency|bar-visible> <value>
   omapanel-backend appearance handoff <theme|background|unlock|font-install|display>
   omapanel-backend devices set touchpad <true|false>
   omapanel-backend devices handoff <display|audio|bluetooth|network|monitor-config|input-config>
+  omapanel-backend storage scan <absolute-directory>
+  omapanel-backend storage choose-directory
+  omapanel-backend storage open <absolute-directory>
   omapanel-backend doctor [--json] [--copy | --output <path>]
   omapanel-backend action [--dry-run] <adapter> <target>
 EOF
@@ -637,6 +642,379 @@ devices_handoff() {
       ;;
     *) echo "Unknown device handoff: $1" >&2; return 2 ;;
   esac
+}
+
+storage_error_json() {
+  jq -cn --arg provider "$1" --arg message "$2" \
+    '{provider:$provider,message:$message}'
+}
+
+udisks_property() {
+  local object_path="$1" interface="$2" property="$3" output
+  output="$(timeout --foreground "$CHECK_TIMEOUT" busctl --json=short get-property \
+    org.freedesktop.UDisks2 "$object_path" "$interface" "$property" 2>/dev/null)" || return
+  jq -c '.data' <<<"$output"
+}
+
+collect_storage_health() {
+  local drives_json="$1" disk_path disk_name block_path drive_path_json drive_path
+  local transport warnings_json temperature_json hours_json selftest_json updated_json
+  local state temperature_c=0 hours=0 selftest="" updated=0
+  local -a rows=()
+
+  while IFS=$'\t' read -r disk_path transport; do
+    [[ -n $disk_path ]] || continue
+    state=unsupported
+    temperature_c=0
+    hours=0
+    selftest=""
+    updated=0
+    warnings_json='[]'
+
+    if [[ $transport == nvme || ${disk_path##*/} == nvme* ]]; then
+      state=unavailable
+      if command -v busctl >/dev/null 2>&1; then
+        disk_name="${disk_path##*/}"
+        block_path="/org/freedesktop/UDisks2/block_devices/$disk_name"
+        drive_path_json="$(udisks_property "$block_path" org.freedesktop.UDisks2.Block Drive 2>/dev/null || true)"
+        drive_path="$(jq -r 'if type == "string" then . else "" end' <<<"${drive_path_json:-null}" 2>/dev/null || true)"
+        if [[ $drive_path == /org/freedesktop/UDisks2/drives/* ]]; then
+          warnings_json="$(udisks_property "$drive_path" org.freedesktop.UDisks2.NVMe.Controller SmartCriticalWarning 2>/dev/null || printf '[]')"
+          temperature_json="$(udisks_property "$drive_path" org.freedesktop.UDisks2.NVMe.Controller SmartTemperature 2>/dev/null || printf 'null')"
+          hours_json="$(udisks_property "$drive_path" org.freedesktop.UDisks2.NVMe.Controller SmartPowerOnHours 2>/dev/null || printf 'null')"
+          selftest_json="$(udisks_property "$drive_path" org.freedesktop.UDisks2.NVMe.Controller SmartSelftestStatus 2>/dev/null || printf 'null')"
+          updated_json="$(udisks_property "$drive_path" org.freedesktop.UDisks2.NVMe.Controller SmartUpdated 2>/dev/null || printf 'null')"
+          if jq -e 'type == "array"' <<<"$warnings_json" >/dev/null 2>&1; then
+            if jq -e 'length > 0' <<<"$warnings_json" >/dev/null; then state=critical; else state=healthy; fi
+            temperature_c="$(jq -nr --argjson value "${temperature_json:-null}" \
+              '$value | if type == "number" and . > 0 then ((. - 273.15) * 10 | round) / 10 else 0 end')"
+            hours="$(jq -nr --argjson value "${hours_json:-null}" '$value | if type == "number" then . else 0 end')"
+            selftest="$(jq -r 'if type == "string" then . else "" end' <<<"${selftest_json:-null}")"
+            updated="$(jq -nr --argjson value "${updated_json:-null}" '$value | if type == "number" then . else 0 end')"
+          fi
+        fi
+      fi
+    fi
+
+    rows+=("$(jq -cn --arg path "$disk_path" --arg state "$state" \
+      --argjson temperatureC "$temperature_c" --argjson powerOnHours "$hours" \
+      --arg selftestStatus "$selftest" --argjson updatedAtEpoch "$updated" \
+      --argjson warnings "$warnings_json" \
+      '{path:$path,state:$state,temperatureC:$temperatureC,powerOnHours:$powerOnHours,
+        selftestStatus:$selftestStatus,updatedAtEpoch:$updatedAtEpoch,warnings:$warnings}')")
+  done < <(jq -r '.[] | [.path,.transport] | @tsv' <<<"$drives_json")
+
+  json_lines_to_array "${rows[@]}"
+}
+
+storage_cache_summary() {
+  local cache_dir="${OMAPANEL_PACMAN_CACHE:-/var/cache/pacman/pkg}"
+  local cache_state=unavailable total_bytes=0 file_count=0 partial=false
+  local candidate_state=unavailable candidate_output="" candidate_bytes=0 candidate_count=0
+  local find_output="" find_rc=0 candidate path size
+
+  if [[ -d $cache_dir && -r $cache_dir ]]; then
+    set +e
+    find_output="$(find "$cache_dir" -maxdepth 1 -type f -printf '%s\n' 2>/dev/null)"
+    find_rc=$?
+    set -e
+    total_bytes="$(awk '{ sum += $1 } END { printf "%.0f", sum + 0 }' <<<"$find_output")"
+    file_count="$(awk 'NF { count++ } END { print count + 0 }' <<<"$find_output")"
+    [[ $find_rc == 0 ]] || partial=true
+    cache_state=ok
+  fi
+
+  if command -v paccache >/dev/null 2>&1 && [[ $cache_state == ok ]]; then
+    if timed_capture candidate_output paccache -dvqk2 -c "$cache_dir"; then
+      candidate_state=ok
+      while IFS= read -r candidate; do
+        [[ -n $candidate ]] || continue
+        path="$candidate"
+        [[ $path == /* ]] || path="$cache_dir/$candidate"
+        [[ -f $path ]] || continue
+        size="$(stat -c '%s' -- "$path" 2>/dev/null || printf 0)"
+        [[ $size =~ ^[0-9]+$ ]] || size=0
+        candidate_bytes=$((candidate_bytes + size))
+        candidate_count=$((candidate_count + 1))
+      done <<<"$candidate_output"
+    else
+      candidate_state=error
+    fi
+  fi
+
+  jq -cn --arg state "$cache_state" --arg path "$cache_dir" \
+    --argjson totalBytes "$total_bytes" --argjson fileCount "$file_count" --argjson partial "$partial" \
+    --arg candidateState "$candidate_state" --argjson candidateBytes "$candidate_bytes" \
+    --argjson candidateCount "$candidate_count" \
+    '{state:$state,path:$path,totalBytes:$totalBytes,fileCount:$fileCount,partial:$partial,
+      prune:{state:$candidateState,policy:"Keep two cached versions",candidateBytes:$candidateBytes,
+        candidateCount:$candidateCount}}'
+}
+
+storage_orphan_summary() {
+  local state=unavailable orphan_output="" packages='[]'
+  if command -v pacman >/dev/null 2>&1; then
+    if timed_capture orphan_output pacman -Qtdq; then
+      packages="$(printf '%s\n' "$orphan_output" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')"
+      state=ok
+    else
+      case $? in
+        1) state=ok; packages='[]' ;;
+        *) state=error ;;
+      esac
+    fi
+  fi
+  jq -cn --arg state "$state" --argjson packages "$packages" \
+    '{state:$state,count:($packages | length),packages:$packages}'
+}
+
+storage_journal_summary() {
+  local state=unavailable journal_output="" size_text="" bytes=0
+  if command -v journalctl >/dev/null 2>&1 && timed_capture journal_output journalctl --disk-usage --no-pager; then
+    size_text="$(sed -nE 's/.*take up ([0-9]+([.][0-9]+)?[KMGTP]?) in.*/\1/p' <<<"$journal_output" | head -n1)"
+    if [[ -n $size_text ]] && command -v numfmt >/dev/null 2>&1; then
+      bytes="$(numfmt --from=iec "$size_text" 2>/dev/null || printf 0)"
+    fi
+    [[ $bytes =~ ^[0-9]+$ ]] || bytes=0
+    state=ok
+  fi
+  jq -cn --arg state "$state" --arg display "$size_text" --argjson totalBytes "$bytes" \
+    '{state:$state,totalBytes:$totalBytes,display:$display}'
+}
+
+storage_user_cache_summary() {
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}" state=unavailable cache_output="" bytes=0
+  if [[ -d $cache_dir && -r $cache_dir ]] && timed_capture cache_output du -sx -B1 -- "$cache_dir"; then
+    bytes="$(awk 'NR == 1 { print $1 + 0 }' <<<"$cache_output")"
+    [[ $bytes =~ ^[0-9]+$ ]] || bytes=0
+    state=ok
+  fi
+  jq -cn --arg state "$state" --arg path "$cache_dir" --argjson totalBytes "$bytes" \
+    '{state:$state,path:$path,totalBytes:$totalBytes}'
+}
+
+storage_snapshot_summary() {
+  local state=unavailable configs_output="" list_output="" config name subvolume scope_state error_message list_rc
+  local configs='[]' snapshots='[]'
+  local -a scopes=()
+
+  if ! command -v snapper >/dev/null 2>&1; then
+    jq -cn '{state:"unavailable",scopes:[],snapshotCount:0}'
+    return
+  fi
+  if ! timed_capture configs_output snapper --jsonout list-configs ||
+    ! jq -e '.configs | type == "array"' <<<"$configs_output" >/dev/null 2>&1; then
+    jq -cn '{state:"error",scopes:[],snapshotCount:0}'
+    return
+  fi
+
+  state=ok
+  configs="$(jq -c '.configs' <<<"$configs_output")"
+  while IFS=$'\t' read -r name subvolume; do
+    [[ -n $name ]] || continue
+    scope_state=ok
+    error_message=""
+    list_output=""
+    set +e
+    list_output="$(timeout --foreground "$CHECK_TIMEOUT" snapper --jsonout --iso --utc -c "$name" list 2>&1)"
+    list_rc=$?
+    set -e
+    if [[ $list_rc == 0 ]]; then
+      if jq -e '.snapshots | type == "array"' <<<"$list_output" >/dev/null 2>&1; then
+        snapshots="$(jq -c --arg config "$name" '
+          [.snapshots[]? | {
+            config:$config,number:((.number // .num // 0) | tonumber),type:(.type // ""),
+            date:(.date // ""),user:(.user // ""),description:(.description // ""),
+            cleanup:(.cleanup // .cleanup_algorithm // ""),usedSpace:(.used_space // "")
+          }]' <<<"$list_output")"
+      else
+        scope_state=error
+        error_message="Snapper returned an unsupported snapshot response."
+        snapshots='[]'
+      fi
+    else
+      if grep -qiE 'no permissions|permission denied|not authorized' <<<"$list_output"; then
+        scope_state=permission-denied
+        error_message="Snapshot contents require permissions that OmaPanel does not request."
+      else
+        scope_state=error
+        error_message="Snapshot contents could not be read."
+      fi
+      snapshots='[]'
+    fi
+    scopes+=("$(jq -cn --arg config "$name" --arg subvolume "$subvolume" \
+      --arg state "$scope_state" --arg message "$error_message" --argjson snapshots "$snapshots" \
+      '{config:$config,subvolume:$subvolume,state:$state,message:$message,snapshots:$snapshots}')")
+  done < <(jq -r '.[] | [.config,.subvolume] | @tsv' <<<"$configs")
+
+  jq -cn --arg state "$state" --argjson scopes "$(json_lines_to_array "${scopes[@]}")" \
+    '{state:$state,scopes:$scopes,snapshotCount:([$scopes[].snapshots[]?] | length)}'
+}
+
+collect_storage() {
+  local block_state=unavailable mount_state=unavailable lsblk_output='' findmnt_output=''
+  local drives='[]' filesystems='[]' health='[]'
+  local package_cache orphans journal user_cache snapshots
+  local -a errors=()
+
+  if command -v lsblk >/dev/null 2>&1 && timed_capture lsblk_output lsblk --json --bytes \
+    --output NAME,PATH,TYPE,SIZE,FSTYPE,MOUNTPOINTS,LABEL,MODEL,VENDOR,TRAN,ROTA,RM,RO &&
+    jq -e '.blockdevices | type == "array"' <<<"$lsblk_output" >/dev/null 2>&1; then
+    drives="$(jq -c '
+      def descendants: .children[]? | ., descendants;
+      [.blockdevices[]? | select(.type == "disk" and ((.name // "") | startswith("zram") | not)) |
+        {id:(.path // ("/dev/" + .name)),name:(.name // "Drive"),path:(.path // ""),
+         sizeBytes:((.size // 0) | tonumber),model:(.model // ""),vendor:(.vendor // ""),
+         transport:(.tran // ""),rotational:(.rota == true),removable:(.rm == true),readOnly:(.ro == true),
+         encrypted:([descendants | select(.type == "crypt" or .fstype == "crypto_LUKS")] | length > 0),
+         partitions:[descendants | {
+           name:(.name // ""),path:(.path // ""),type:(.type // ""),sizeBytes:((.size // 0) | tonumber),
+           filesystem:(.fstype // ""),label:(.label // ""),mountpoints:(.mountpoints // [] | map(select(. != null))),
+           encrypted:(.type == "crypt" or .fstype == "crypto_LUKS"),readOnly:(.ro == true)
+         }] }]' <<<"$lsblk_output")"
+    block_state=ok
+    health="$(collect_storage_health "$drives")"
+  else
+    errors+=("$(storage_error_json block-devices 'Physical drives and partitions could not be read.')")
+  fi
+
+  if command -v findmnt >/dev/null 2>&1 && timed_capture findmnt_output findmnt --json --bytes --real \
+    --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%,OPTIONS &&
+    jq -e '.filesystems | type == "array"' <<<"$findmnt_output" >/dev/null 2>&1; then
+    filesystems="$(jq -c '
+      def flatten: ., (.children[]? | flatten);
+      [.filesystems[]? | flatten |
+        select((.target // "") | startswith("/")) |
+        . + {baseSource:((.source // "") | sub("\\[.*$"; ""))}] |
+      sort_by([.baseSource,.fstype,(.size // 0)]) |
+      group_by([.baseSource,.fstype,(.size // 0)]) |
+      map(. as $group |
+        ($group | map(.target) | unique) as $mounts |
+        ($group | map(select(.target == "/"))[0] // $group[0]) as $primary |
+        {source:$primary.baseSource,mountpoint:$primary.target,mountpoints:$mounts,
+         filesystem:($primary.fstype // ""),sizeBytes:(($primary.size // 0) | tonumber),
+         usedBytes:(($primary.used // 0) | tonumber),availableBytes:(($primary.avail // 0) | tonumber),
+         percent:((($primary["use%"] // "0%") | sub("%$"; "") | tonumber) // 0),
+         readOnly:(($primary.options // "") | split(",") | index("ro") != null),
+         subvolumeMounts:(if ($primary.fstype // "") == "btrfs" then $mounts else [] end)})' \
+      <<<"$findmnt_output")"
+    mount_state=ok
+  else
+    errors+=("$(storage_error_json filesystems 'Mounted filesystem usage could not be read.')")
+  fi
+
+  package_cache="$(storage_cache_summary)"
+  orphans="$(storage_orphan_summary)"
+  journal="$(storage_journal_summary)"
+  user_cache="$(storage_user_cache_summary)"
+  snapshots="$(storage_snapshot_summary)"
+
+  jq -cn --argjson schemaVersion "$STORAGE_SCHEMA_VERSION" --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg blockState "$block_state" --arg mountState "$mount_state" \
+    --argjson drives "$drives" --argjson filesystems "$filesystems" --argjson health "$health" \
+    --argjson packageCache "$package_cache" --argjson orphans "$orphans" \
+    --argjson journal "$journal" --argjson userCache "$user_cache" --argjson snapshots "$snapshots" \
+    --argjson errors "$(json_lines_to_array "${errors[@]}")" \
+    '{schemaVersion:$schemaVersion,generatedAt:$generatedAt,
+      providers:{blockDevices:$blockState,filesystems:$mountState,
+        health:(if ($health | length) == 0 then "unavailable"
+          elif any($health[]; .state == "healthy" or .state == "warning" or .state == "critical") then "ok"
+          elif any($health[]; .state == "unavailable") then "unavailable"
+          else "unsupported" end)},
+      drives:[$drives[] as $drive | $drive + {health:([$health[] | select(.path == $drive.path)][0] // {state:"unavailable"})}],
+      filesystems:$filesystems,
+      maintenance:{packageCache:$packageCache,orphans:$orphans,journal:$journal,userCache:$userCache},
+      snapshots:$snapshots,errors:$errors}'
+}
+
+canonical_storage_directory() {
+  local requested="$1" resolved
+  [[ $requested == /* && $requested != *$'\n'* && $requested != *$'\r'* ]] || return 2
+  resolved="$(realpath -e -- "$requested" 2>/dev/null || true)"
+  [[ -n $resolved && -d $resolved && -r $resolved && -x $resolved ]] || return 1
+  printf '%s\n' "$resolved"
+}
+
+storage_scan() {
+  local requested="$1" scan_path stderr_file scan_pid scan_fd rc=0 partial=false
+  local record size path total_bytes=0 child_bytes=0 entry_count=0 direct_bytes=0
+  scan_path="$(canonical_storage_directory "$requested")" || {
+    jq -cn --arg event error --arg path "$requested" --arg message "The selected scan directory is not readable." \
+      '{schemaVersion:1,event:$event,path:$path,message:$message}'
+    echo 'The selected scan directory is not readable.' >&2
+    return 2
+  }
+  stderr_file="$(mktemp)"
+  scan_pid=""
+  cleanup_storage_scan() {
+    if [[ -n ${scan_pid:-} ]]; then
+      kill -TERM "$scan_pid" 2>/dev/null || true
+      wait "$scan_pid" 2>/dev/null || true
+    fi
+    jq -cn --arg event cancelled --arg path "$scan_path" '{event:$event,path:$path}'
+    rm -f -- "$stderr_file"
+    exit 130
+  }
+  trap cleanup_storage_scan TERM INT HUP
+
+  jq -cn --arg event started --arg path "$scan_path" --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{schemaVersion:1,event:$event,path:$path,generatedAt:$generatedAt}'
+  coproc STORAGE_DU { exec du -x -B1 --max-depth=1 --null -- "$scan_path" 2>"$stderr_file"; }
+  scan_pid="$STORAGE_DU_PID"
+  exec {scan_fd}<&"${STORAGE_DU[0]}"
+  while IFS= read -r -d '' record; do
+    size="${record%%$'\t'*}"
+    path="${record#*$'\t'}"
+    [[ $size =~ ^[0-9]+$ ]] || continue
+    if [[ $path == "$scan_path" ]]; then
+      total_bytes="$size"
+      continue
+    fi
+    child_bytes=$((child_bytes + size))
+    entry_count=$((entry_count + 1))
+    jq -cn --arg event entry --arg path "$path" --arg name "${path##*/}" --argjson sizeBytes "$size" \
+      '{event:$event,path:$path,name:$name,sizeBytes:$sizeBytes,kind:"directory"}'
+  done <&"$scan_fd"
+  exec {scan_fd}<&-
+  set +e
+  wait "$scan_pid"
+  rc=$?
+  set -e
+  scan_pid=""
+  trap - TERM INT HUP
+  [[ $rc == 0 ]] || partial=true
+  [[ -s $stderr_file ]] && partial=true
+  rm -f -- "$stderr_file"
+  (( total_bytes >= child_bytes )) && direct_bytes=$((total_bytes - child_bytes)) || direct_bytes=0
+  jq -cn --arg event completed --arg path "$scan_path" --argjson totalBytes "$total_bytes" \
+    --argjson directFileBytes "$direct_bytes" --argjson entryCount "$entry_count" --argjson partial "$partial" \
+    '{event:$event,path:$path,totalBytes:$totalBytes,directFileBytes:$directFileBytes,
+      entryCount:$entryCount,partial:$partial}'
+}
+
+storage_choose_directory() {
+  local selected="" resolved=""
+  command -v omarchy >/dev/null 2>&1 || { echo 'The Omarchy command is unavailable.' >&2; return 1; }
+  selected="$(omarchy file select --directory 2>/dev/null || true)"
+  if [[ -z $selected ]]; then
+    jq -cn '{schemaVersion:1,ok:true,cancelled:true,path:""}'
+    return
+  fi
+  resolved="$(canonical_storage_directory "$selected")" || {
+    echo 'The selected directory is not readable.' >&2
+    return 1
+  }
+  jq -cn --arg path "$resolved" '{schemaVersion:1,ok:true,cancelled:false,path:$path}'
+}
+
+storage_open() {
+  local resolved
+  resolved="$(canonical_storage_directory "$1")" || {
+    echo 'The selected directory is not readable.' >&2
+    return 2
+  }
+  command -v gio >/dev/null 2>&1 || { echo 'The desktop file handler is unavailable.' >&2; return 1; }
+  exec gio open "$resolved"
 }
 
 appearance_error_json() {
@@ -1443,7 +1821,7 @@ validate_target() {
       desktop_file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$target.desktop"
       [[ -f $desktop_file ]]
       ;;
-    update|update-restart|restart-shell|journal-user|journal-system|open-hypr-config|snapshot-create|snapshot-restore|review-orphans|copy-report)
+    update|update-restart|restart-shell|journal-user|journal-system|open-hypr-config|snapshot-create|snapshot-restore|review-orphans|cache-prune|disk-speedtest|copy-report)
       [[ $target == _ ]]
       ;;
     *)
@@ -1555,6 +1933,18 @@ action_spec() {
       ACTION_DESTRUCTIVE=false
       ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy update orphan pkgs)
       ;;
+    cache-prune)
+      ACTION_LABEL="Prune package cache"
+      ACTION_WORKFLOW="A terminal will run Omarchy's package-cache policy, keeping the two newest cached versions. Review the sudo prompt before continuing."
+      ACTION_TERMINAL=true
+      ACTION_ARGV=(xdg-terminal-exec --app-id=org.omarchy.terminal omarchy update pkg prune)
+      ;;
+    disk-speedtest)
+      ACTION_LABEL="Open disk speed test"
+      ACTION_WORKFLOW="Quattro will open Omarchy's disk speed test. Starting the test writes and removes a temporary benchmark file; cancel it from that panel at any time."
+      ACTION_DESTRUCTIVE=false
+      ACTION_ARGV=(omarchy-shell shell summon omarchy.disk-speedtest)
+      ;;
     copy-report)
       ACTION_LABEL="Copy diagnostic report"
       ACTION_WORKFLOW="OmaPanel will copy a sanitized health summary without logs or personal files."
@@ -1637,6 +2027,10 @@ main() {
           [[ -z ${3:-} ]] || { usage; exit 2; }
           collect_devices
           ;;
+        storage)
+          [[ -z ${3:-} ]] || { usage; exit 2; }
+          collect_storage
+          ;;
         *) usage; exit 2 ;;
       esac
       ;;
@@ -1662,6 +2056,23 @@ main() {
         handoff)
           [[ $# == 3 ]] || { usage; exit 2; }
           appearance_handoff "$3"
+          ;;
+        *) usage; exit 2 ;;
+      esac
+      ;;
+    storage)
+      case "${2:-}" in
+        scan)
+          [[ $# == 3 ]] || { usage; exit 2; }
+          storage_scan "$3"
+          ;;
+        choose-directory)
+          [[ $# == 2 ]] || { usage; exit 2; }
+          storage_choose_directory
+          ;;
+        open)
+          [[ $# == 3 ]] || { usage; exit 2; }
+          storage_open "$3"
           ;;
         *) usage; exit 2 ;;
       esac

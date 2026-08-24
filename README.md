@@ -2,8 +2,8 @@
 
 **The Omarchy Control Center.** OmaPanel is a keyboard-first, mouse-complete
 Quattro panel for appearance, installed software, system health, connected
-devices, and reaching the correct Omarchy workflow when something needs to
-change.
+devices, storage insight, and reaching the correct Omarchy workflow when
+something needs to change.
 
 OmaPanel is intentionally a map, not a second package manager. It collects
 state without privilege, explains ownership and impact, and delegates changes
@@ -11,7 +11,7 @@ to the existing Omarchy command or workflow that already owns the operation.
 
 ## Features
 
-- Responsive Overview, Appearance, Programs, Doctor, and Devices pages.
+- Responsive Overview, Appearance, Programs, Doctor, Devices, and Storage pages.
 - Live Omarchy theme, type-scale, spacing, focus, and surface colors.
 - Current theme and background preview with native Omarchy picker handoffs that
   return to the same OmaPanel view when selection finishes.
@@ -23,6 +23,12 @@ to the existing Omarchy command or workflow that already owns the operation.
   Bluetooth and network summaries, and native Quattro handoffs.
 - Canonical touchpad control with one-level undo; other device changes stay in
   Omarchy's existing panels and configuration workflows.
+- Physical-drive, filesystem, encryption, capacity, and NVMe health summaries
+  without persistent hardware identifiers.
+- On-demand, cancellable Home or selected-folder scans with bounded drill-down
+  and a default file-manager handoff; storage is never scanned automatically.
+- Package-cache, orphan-package, journal, user-cache, and Snapper insight with
+  confirmed handoffs to canonical maintenance and recovery workflows.
 - Applications, web apps, TUI launchers, plugins, Flatpaks, local launchers,
   and an opt-in advanced Pacman/AUR package list.
 - Package/launcher ownership and protected first-party components.
@@ -120,11 +126,26 @@ identifiers, environment/process arguments, journals, and authentication
 material. Exact local detail remains inside the graphical result where it is
 useful for diagnosis.
 
+## Storage
+
+Storage is diagnostic by default. Its overview refreshes when the page first
+opens or when explicitly refreshed. Space scans begin only from **Scan Home**
+or **Choose folder**, stay on the selected filesystem, do not follow symlinks,
+and may be cancelled. Selecting a result scans that directory one level deeper;
+Back returns through the scan history. Results exist only for the current panel
+session.
+
+OmaPanel shows package-cache and orphan candidates before handing maintenance
+to Omarchy. Journal and user-cache sizes are informational because there is no
+matching reviewed cleanup workflow. Snapshot contents appear only when Snapper
+allows unprivileged reads; OmaPanel does not change Snapper permissions or
+prompt for background authentication.
+
 ## Controls
 
 | Keys | Action |
 |---|---|
-| `Alt+1/2/3/4/5` | Overview / Appearance / Programs / Doctor / Devices |
+| `Alt+1/2/3/4/5/6` | Overview / Appearance / Programs / Doctor / Devices / Storage |
 | `Tab` / `Shift+Tab` | Move through page controls |
 | `Ctrl+Z` | Undo the latest direct setting while offered |
 | `Page Up/Down`, `Home/End` | Scroll the Appearance page |
@@ -165,6 +186,11 @@ right-click.
 - Touchpad state is the only direct Devices write. Resolution, refresh,
   arrangement, audio, Bluetooth, network, keyboard, and mouse changes are
   delegated to their existing Omarchy workflows.
+- Storage collectors never mount, unmount, format, partition, delete files,
+  change Snapper ACLs, start SMART tests, or request privilege. Cache pruning,
+  orphan review, and snapshot actions open fixed Omarchy terminal workflows.
+- The disk benchmark stays in Quattro's native panel and warns before it writes
+  its temporary test file.
 - Mise versions are visibility-only because `mise uninstall` does not update
   the configuration files that requested a tool.
 

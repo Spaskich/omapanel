@@ -27,6 +27,7 @@ case "${1:-}" in
   -Qqm) printf '%s\n' fixture-package ;;
   -Qqe) printf '%s\n' fixture-package ;;
   -Qqdt) exit 1 ;;
+  -Qtdq) printf '%s\n' fixture-orphan ;;
   -Qqo)
     [[ ${2:-} == *fixture-package*.desktop ]] && { echo fixture-package; exit 0; }
     exit 1
@@ -85,6 +86,7 @@ elif [[ ${1:-} == network && ${2:-} == status ]]; then
     printf '%s\n' $'wifi\tFixture Wi-Fi\t73\t5180'
   fi
 elif [[ ${1:-} == launch && ${2:-} == config && ${3:-} == editor ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
+elif [[ ${1:-} == file && ${2:-} == select && ${3:-} == --directory ]]; then printf '%s\n' "$FIXTURE_SCAN_PICKER"
 elif [[ ${1:-} == menu || ${1:-} == shell ]]; then printf '%s\n' "$*" >>"$FIXTURE_ACTION_LOG"
 else exit 0
 fi
@@ -138,12 +140,81 @@ else
 fi
 EOF
 
-for name in omarchy-shell xdg-terminal-exec snapper; do
+for name in omarchy-shell xdg-terminal-exec; do
   cat >"$TMP/bin/$name" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
 done
+
+cat >"$TMP/bin/lsblk" <<'EOF'
+#!/bin/bash
+cat <<'JSON'
+{"blockdevices":[{"name":"nvme0n1","path":"/dev/nvme0n1","type":"disk","size":1000000000000,"fstype":null,"mountpoints":null,"label":null,"model":"Fixture NVMe","vendor":"Fixture","tran":"nvme","rota":false,"rm":false,"ro":false,"serial":"PRIVATE-SERIAL","children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","type":"part","size":999000000000,"fstype":"crypto_LUKS","mountpoints":null,"label":null,"ro":false,"children":[{"name":"fixture-root","path":"/dev/mapper/fixture-root","type":"crypt","size":998000000000,"fstype":"btrfs","mountpoints":["/home","/"],"label":null,"ro":false}]}]},{"name":"sda","path":"/dev/sda","type":"disk","size":500000000000,"fstype":null,"mountpoints":null,"label":null,"model":"Fixture SATA","vendor":"Fixture","tran":"sata","rota":false,"rm":false,"ro":false,"children":[]},{"name":"zram0","path":"/dev/zram0","type":"disk","size":8000000000,"fstype":"swap","mountpoints":["[SWAP]"],"label":null,"model":null,"vendor":null,"tran":null,"rota":false,"rm":false,"ro":false}]}
+JSON
+EOF
+
+cat >"$TMP/bin/findmnt" <<'EOF'
+#!/bin/bash
+cat <<'JSON'
+{"filesystems":[{"target":"/","source":"/dev/mapper/fixture-root[/@]","fstype":"btrfs","size":998000000000,"used":300000000000,"avail":698000000000,"use%":"31%","options":"rw,subvol=/@","children":[{"target":"/home","source":"/dev/mapper/fixture-root[/@home]","fstype":"btrfs","size":998000000000,"used":300000000000,"avail":698000000000,"use%":"31%","options":"rw,subvol=/@home"},{"target":"/boot","source":"/dev/nvme0n1p2","fstype":"vfat","size":1000000000,"used":250000000,"avail":750000000,"use%":"25%","options":"rw"}]}]}
+JSON
+EOF
+
+cat >"$TMP/bin/busctl" <<'EOF'
+#!/bin/bash
+object="${4:-}"
+property="${6:-}"
+if [[ $object == */block_devices/nvme0n1 && $property == Drive ]]; then
+  printf '%s\n' '{"type":"o","data":"/org/freedesktop/UDisks2/drives/fixture_nvme"}'
+elif [[ $object == */drives/fixture_nvme ]]; then
+  case "$property" in
+    SmartCriticalWarning) printf '%s\n' '{"type":"as","data":[]}' ;;
+    SmartTemperature) printf '%s\n' '{"type":"q","data":303}' ;;
+    SmartPowerOnHours) printf '%s\n' '{"type":"t","data":1234}' ;;
+    SmartSelftestStatus) printf '%s\n' '{"type":"s","data":"success"}' ;;
+    SmartUpdated) printf '%s\n' '{"type":"t","data":1700000000}' ;;
+    *) exit 1 ;;
+  esac
+else
+  exit 1
+fi
+EOF
+
+cat >"$TMP/bin/paccache" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$OMAPANEL_PACMAN_CACHE/fixture-old.pkg.tar.zst"
+EOF
+
+cat >"$TMP/bin/journalctl" <<'EOF'
+#!/bin/bash
+if [[ ${1:-} == --disk-usage ]]; then
+  echo 'Archived and active journals take up 64.0M in the file system.'
+fi
+EOF
+
+cat >"$TMP/bin/snapper" <<'EOF'
+#!/bin/bash
+if [[ $* == *list-configs* ]]; then
+  echo '{"configs":[{"config":"root","subvolume":"/"}]}'
+elif [[ ${FIXTURE_SNAPPER_READABLE:-false} == true ]]; then
+  echo '{"snapshots":[{"number":7,"type":"single","date":"2026-08-24 12:00:00","user":"root","description":"Fixture snapshot","cleanup":"number"}]}'
+else
+  echo 'No permissions.' >&2
+  exit 1
+fi
+EOF
+
+cat >"$TMP/bin/gio" <<'EOF'
+#!/bin/bash
+printf 'gio %s\n' "$*" >>"$FIXTURE_ACTION_LOG"
+EOF
+
+cat >"$TMP/bin/du" <<'EOF'
+#!/bin/bash
+if [[ ${FIXTURE_DU_SLOW:-false} == true ]]; then exec sleep 30; fi
+exec /usr/bin/du "$@"
+EOF
 
 cat >"$TMP/bin/omarchy-shell" <<'EOF'
 #!/bin/bash
@@ -189,8 +260,17 @@ export XDG_DATA_HOME="$TMP/home/.local/share"
 export XDG_DATA_DIRS="$TMP/system/share"
 export XDG_STATE_HOME="$TMP/home/.local/state"
 export FIXTURE_ACTION_LOG="$TMP/appearance-actions"
+export OMAPANEL_PACMAN_CACHE="$TMP/pacman-cache"
+export XDG_CACHE_HOME="$TMP/home/.cache"
+export FIXTURE_SCAN_PICKER="$TMP/scan-root"
 
-mkdir -p "$HOME/.config/omarchy" "$HOME/.config/hypr" "$XDG_STATE_HOME/omarchy/current/theme/backgrounds"
+mkdir -p "$HOME/.config/omarchy" "$HOME/.config/hypr" "$XDG_STATE_HOME/omarchy/current/theme/backgrounds" \
+  "$OMAPANEL_PACMAN_CACHE" "$XDG_CACHE_HOME" "$FIXTURE_SCAN_PICKER/folder one" "$FIXTURE_SCAN_PICKER/small"
+dd if=/dev/zero of="$OMAPANEL_PACMAN_CACHE/fixture-current.pkg.tar.zst" bs=1024 count=3 status=none
+dd if=/dev/zero of="$OMAPANEL_PACMAN_CACHE/fixture-old.pkg.tar.zst" bs=1024 count=2 status=none
+dd if=/dev/zero of="$XDG_CACHE_HOME/fixture-cache" bs=1024 count=4 status=none
+dd if=/dev/zero of="$FIXTURE_SCAN_PICKER/folder one/payload" bs=1024 count=8 status=none
+dd if=/dev/zero of="$FIXTURE_SCAN_PICKER/direct-file" bs=1024 count=1 status=none
 cat >"$HOME/.config/omarchy/shell.json" <<'EOF'
 {"version":1,"bar":{"position":"bottom","transparent":true,"layout":{"left":[],"center":[],"right":[]}},"plugins":[]}
 EOF
@@ -285,6 +365,48 @@ grep -Fx 'shell omarchy.network show' "$FIXTURE_ACTION_LOG" >/dev/null || fail "
 grep -Fx "launch config editor $HOME/.config/hypr/monitors.lua" "$FIXTURE_ACTION_LOG" >/dev/null || fail "monitor config handoff"
 grep -Fx "launch config editor $HOME/.config/hypr/input.lua" "$FIXTURE_ACTION_LOG" >/dev/null || fail "input config handoff"
 
+storage="$("$ROOT/scripts/omapanel-backend" collect storage)"
+jq -e '.schemaVersion == 1 and (.drives | length) == 2 and .drives[0].model == "Fixture NVMe" and .drives[0].encrypted == true and .drives[0].health.state == "healthy" and .drives[0].health.temperatureC == 29.9' <<<"$storage" >/dev/null || fail "storage drive and health state"
+jq -e '(.filesystems | length) == 2 and .filesystems[0].mountpoint == "/" and .filesystems[0].mountpoints == ["/","/home"] and .filesystems[0].percent == 31' <<<"$storage" >/dev/null || fail "storage Btrfs filesystem deduplication"
+jq -e '.maintenance.packageCache.totalBytes == 5120 and .maintenance.packageCache.fileCount == 2 and .maintenance.packageCache.prune.candidateBytes == 2048 and .maintenance.orphans.packages == ["fixture-orphan"] and .maintenance.journal.totalBytes > 0 and .maintenance.userCache.totalBytes > 0' <<<"$storage" >/dev/null || fail "storage maintenance insight"
+jq -e '.snapshots.scopes[0].state == "permission-denied" and .snapshots.snapshotCount == 0' <<<"$storage" >/dev/null || fail "storage snapshot permission boundary"
+[[ $storage != *PRIVATE-SERIAL* ]] || fail "storage response leaked hardware identifiers"
+
+readable_storage="$(FIXTURE_SNAPPER_READABLE=true "$ROOT/scripts/omapanel-backend" collect storage)"
+jq -e '.snapshots.scopes[0].state == "ok" and .snapshots.snapshotCount == 1 and .snapshots.scopes[0].snapshots[0].description == "Fixture snapshot"' <<<"$readable_storage" >/dev/null || fail "storage readable snapshots"
+
+scan_output="$($ROOT/scripts/omapanel-backend storage scan "$FIXTURE_SCAN_PICKER")"
+jq -s -e '.[0].event == "started" and .[-1].event == "completed" and .[-1].totalBytes > 0 and .[-1].directFileBytes > 0 and ([.[] | select(.event == "entry" and .name == "folder one" and .sizeBytes > 0)] | length) == 1' <<<"$scan_output" >/dev/null || fail "progressive storage scan"
+set +e
+invalid_scan="$("$ROOT/scripts/omapanel-backend" storage scan relative/path 2>/dev/null)"
+invalid_scan_rc=$?
+set -e
+[[ $invalid_scan_rc == 2 ]] || fail "relative storage scan accepted"
+jq -e '.event == "error" and (.message | contains("not readable"))' <<<"$invalid_scan" >/dev/null || fail "storage scan error event"
+
+picker_output="$($ROOT/scripts/omapanel-backend storage choose-directory)"
+jq -e --arg path "$FIXTURE_SCAN_PICKER" '.ok and (.cancelled | not) and .path == $path' <<<"$picker_output" >/dev/null || fail "storage folder picker"
+"$ROOT/scripts/omapanel-backend" storage open "$FIXTURE_SCAN_PICKER"
+grep -Fx "gio open $FIXTURE_SCAN_PICKER" "$FIXTURE_ACTION_LOG" >/dev/null || fail "storage file-manager handoff"
+
+cancel_output="$TMP/storage-cancel.jsonl"
+set +e
+FIXTURE_DU_SLOW=true "$ROOT/scripts/omapanel-backend" storage scan "$FIXTURE_SCAN_PICKER" >"$cancel_output" &
+cancel_pid=$!
+for _ in {1..50}; do [[ -s $cancel_output ]] && break; sleep 0.01; done
+kill -TERM "$cancel_pid"
+wait "$cancel_pid"
+cancel_rc=$?
+set -e
+[[ $cancel_rc == 130 ]] || fail "storage scan cancellation exit code"
+jq -s -e '.[0].event == "started" and .[-1].event == "cancelled"' "$cancel_output" >/dev/null || fail "storage scan cancellation event"
+
+cache_preview="$($ROOT/scripts/omapanel-backend action --dry-run cache-prune _)"
+jq -e '.ok and .terminal and .destructive and (.argv | join(" ") | contains("omarchy update pkg prune"))' <<<"$cache_preview" >/dev/null || fail "cache prune preview"
+speed_preview="$($ROOT/scripts/omapanel-backend action --dry-run disk-speedtest _)"
+jq -e '.ok and (.destructive | not) and (.workflow | contains("temporary benchmark file")) and (.argv | join(" ") | contains("omarchy.disk-speedtest"))' <<<"$speed_preview" >/dev/null || fail "disk speed-test preview"
+if "$ROOT/scripts/omapanel-backend" action --dry-run cache-prune unsafe >/dev/null 2>&1; then fail "storage action target accepted"; fi
+
 doctor="$("$ROOT/scripts/omapanel-backend" collect doctor)"
 jq -e '.schemaVersion == 2 and (.checks | length) == 11 and .overall.counts.total == 11' <<<"$doctor" >/dev/null || fail "Doctor schema"
 jq -e '.checks[] | select(.id == "hyprland" and .status == "ok")' <<<"$doctor" >/dev/null || fail "Doctor healthy check"
@@ -368,7 +490,7 @@ OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" >/dev/nu
 [[ $(grep -c '^o.bind("SUPER + I"' "$config/hypr/bindings.lua") == 1 ]] || fail "binding setup is not idempotent"
 grep -q 'https://example.test/a//b' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "JSONC string changed"
 [[ -L $HOME/.local/bin/omapanel && $(readlink -f "$HOME/.local/bin/omapanel") == "$ROOT/bin/omapanel" ]] || fail "CLI link setup"
-[[ $("$HOME/.local/bin/omapanel" --version) == 0.4.0 ]] || fail "linked CLI execution"
+[[ $("$HOME/.local/bin/omapanel" --version) == 0.5.0 ]] || fail "linked CLI execution"
 OMAPANEL_CONFIG_HOME="$config" OMAPANEL_SKIP_RUNTIME=true "$ROOT/setup" --remove >/dev/null
 ! grep -q 'setup.omapanel' "$config/omarchy/extensions/omarchy-menu.jsonc" || fail "menu removal failed"
 ! grep -q '^o.bind("SUPER + I"' "$config/hypr/bindings.lua" || fail "binding removal failed"

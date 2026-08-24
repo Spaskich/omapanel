@@ -78,6 +78,33 @@ TestCase {
     compare(Model.networkSummary({state:"ok",type:"disconnected",wifiEnabled:false}), "Wi-Fi off")
   }
 
+  function test_storage() {
+    var state = Model.normalizeStorage({
+      schemaVersion: 1,
+      generatedAt: "now",
+      providers: {blockDevices:"ok",filesystems:"ok",health:"ok"},
+      drives: [{path:"/dev/nvme0n1",health:{state:"healthy"}}],
+      filesystems: [{mountpoint:"/",sizeBytes:1024,usedBytes:512}],
+      maintenance: {
+        packageCache: {state:"ok",totalBytes:1073741824,fileCount:10,prune:{state:"ok",candidateBytes:1024,candidateCount:1}},
+        orphans: {state:"ok",count:2,packages:["alpha","beta"]},
+        journal: {state:"ok",totalBytes:1024},
+        userCache: {state:"ok",totalBytes:2048}
+      },
+      snapshots: {state:"ok",snapshotCount:1,scopes:[{config:"root",state:"ok",snapshots:[{number:1}]}]},
+      errors: []
+    })
+    verify(state !== null)
+    compare(Model.formatBytes(0), "0 B")
+    compare(Model.formatBytes(1536), "1.5 KiB")
+    compare(Model.storageHealthLabel(state.drives[0].health), "Healthy")
+    verify(Model.storageHealthUpdatedLabel(Math.round(Date.now() / 1000)).indexOf("just now") !== -1)
+    compare(Model.storageCategorySummary(state, "drives"), "1 drive · 1 mounted filesystem")
+    compare(Model.storageCategorySummary(state, "maintenance"), "1 GiB package cache · 2 orphans")
+    compare(Model.sortStorageEntries([{name:"Small",sizeBytes:1},{name:"Large",sizeBytes:3}])[0].name, "Large")
+    compare(Model.normalizeStorage({schemaVersion: 2}), null)
+  }
+
   function test_doctor_filtering() {
     var checks = [
       { category: "Omarchy", status: "ok" },

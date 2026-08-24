@@ -47,11 +47,15 @@
 
 ## v0.5 — Storage
 
-- Filesystem/mount overview, large-directory discovery, SMART health, cache and
-  orphan review, and snapshot browsing.
-- Start read-only. Privileged actions require a narrow upstream/polkit API.
-- Formatting, partition editing, and other destructive disk operations remain
-  excluded until Omarchy provides a canonical safe backend.
+- Shipped filesystem/mount overview with Btrfs capacity deduplication and
+  privacy-conscious UDisks2 NVMe health.
+- Shipped explicit, cancellable Home/selected-folder discovery with bounded
+  drill-down and default file-manager routing.
+- Shipped package cache, orphan, journal, user-cache, and capability-aware
+  snapshot insight with confirmed handoffs to canonical workflows.
+- Formatting, partition editing, mount changes, direct cleanup, SMART tests,
+  and background privilege remain excluded until Omarchy provides a canonical
+  safe backend.
 
 ## v0.6 — Extended personalization
 

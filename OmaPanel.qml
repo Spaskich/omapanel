@@ -18,7 +18,7 @@ Item {
   property var manifest: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "spaskich.omapanel"
-  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.4.0"
+  readonly property string pluginVersion: manifest && manifest.version ? String(manifest.version) : "0.5.0"
   readonly property string sourceDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
   readonly property string backendPath: sourceDir + "/scripts/omapanel-backend"
   readonly property var appLibrary: shell ? shell.appLibrary : null
@@ -32,6 +32,7 @@ Item {
   property var healthRaw: []
   property var appearance: Model.emptyAppearance()
   property var devices: Model.emptyDevices()
+  property var storage: Model.emptyStorage()
   property var appMetadata: ({})
   property string programQuery: ""
   property string programFilter: "all"
@@ -40,6 +41,8 @@ Item {
   property int selectedProgramIndex: 0
   property int selectedHealthIndex: 0
   property int selectedDeviceIndex: 0
+  property int selectedStorageIndex: 0
+  property int selectedScanIndex: 0
   property int programRevision: 0
   property int healthRevision: 0
 
@@ -49,6 +52,10 @@ Item {
   property bool appearanceBusy: false
   property bool devicesLoading: false
   property bool devicesBusy: false
+  property bool storageLoading: false
+  property bool storageScanLoading: false
+  property bool storageScanCancelRequested: false
+  property bool storagePickerLoading: false
   property string programsError: ""
   property string healthError: ""
   property string programOutput: ""
@@ -58,6 +65,17 @@ Item {
   property string appearanceError: ""
   property string devicesOutput: ""
   property string devicesError: ""
+  property string storageOutput: ""
+  property string storageError: ""
+  property string storageScanError: ""
+  property string storageScanPath: ""
+  property string storagePickerOutput: ""
+  property string pendingStoragePath: ""
+  property var storageScanEntries: []
+  property var storageScanHistory: []
+  property double storageScanTotalBytes: 0
+  property double storageScanDirectBytes: 0
+  property bool storageScanPartial: false
   property string pendingAppearanceSetting: ""
   property string pendingAppearanceValue: ""
   property var pendingAppearancePrevious: null
@@ -106,6 +124,13 @@ Item {
     { id: "bluetooth", title: "Bluetooth", icon: "󰂯", description: "Adapter power and connected devices" },
     { id: "network", title: "Network", icon: "󰛳", description: "Active connection, signal, interface and local address" },
     { id: "input", title: "Input", icon: "", description: "Keyboard layout, pointers, touch and tablet devices" }
+  ]
+
+  readonly property var storageCategories: [
+    { id: "drives", title: "Drives", icon: "󰋊", description: "Physical drives, mounted filesystems and read-only health signals" },
+    { id: "space", title: "Space Usage", icon: "󰆼", description: "Cancellable, one-level scans of Home or a folder you choose" },
+    { id: "maintenance", title: "Maintenance", icon: "󰃢", description: "Package cache, orphan packages, journals and user cache" },
+    { id: "snapshots", title: "Snapshots", icon: "󰋚", description: "Configured recovery scopes and snapshots when permissions allow" }
   ]
 
   readonly property var audioSink: Pipewire.defaultAudioSink
@@ -173,23 +198,26 @@ Item {
   }
 
   function close() {
+    if (storageScanProc.running) cancelStorageScan()
     confirmOpen = false
     opened = false
   }
 
   function requestClose() {
+    if (storageScanProc.running) cancelStorageScan()
     if (shell && typeof shell.hide === "function") shell.hide(pluginId)
     else close()
   }
 
   function setPage(index) {
-    pageIndex = Math.max(0, Math.min(4, index))
+    pageIndex = Math.max(0, Math.min(5, index))
     detailOpen = false
     cursorActive = true
     if (pageIndex === 1 && appearance.generatedAt === "" && !appearanceLoading) refreshAppearance()
     if (pageIndex === 2 && programsRaw.length === 0 && !programsLoading) refreshPrograms()
     if (pageIndex === 3 && healthRaw.length === 0 && !healthLoading) refreshHealth()
     if (pageIndex === 4 && devices.generatedAt === "" && !devicesLoading) refreshDevices()
+    if (pageIndex === 5 && storage.generatedAt === "" && !storageLoading) refreshStorage()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -303,6 +331,131 @@ Item {
     if (deviceHandoffProc.running || devicesBusy) return
     pendingDeviceHandoff = String(kind)
     deviceHandoffProc.running = true
+  }
+
+  function refreshStorage() {
+    if (storageProc.running || backendPath === "") return
+    storageLoading = true
+    storageError = ""
+    storageOutput = ""
+    storageProc.running = true
+  }
+
+  function applyStorage(raw) {
+    try {
+      var parsed = JSON.parse(String(raw || ""))
+      var normalized = Model.normalizeStorage(parsed)
+      if (!normalized) throw new Error("Unsupported storage response")
+      storage = normalized
+      storageError = ""
+    } catch (e) {
+      storageError = "Storage could not be read: " + e
+    }
+  }
+
+  function openStorageCategory(index) {
+    selectedStorageIndex = Math.max(0, Math.min(storageCategories.length - 1, Number(index) || 0))
+    setPage(5)
+    detailOpen = true
+  }
+
+  function rebuildStorageScan() {
+    var rows = Model.sortStorageEntries(storageScanEntries)
+    storageScanModel.clear()
+    for (var i = 0; i < rows.length; i++) storageScanModel.append(rows[i])
+    selectedScanIndex = Model.clampIndex(selectedScanIndex, storageScanModel.count)
+  }
+
+  function startStorageScan(path, rememberCurrent) {
+    if (storageScanProc.running || !path) return
+    if (rememberCurrent === true && storageScanPath !== "")
+      storageScanHistory = storageScanHistory.concat([storageScanPath])
+    pendingStoragePath = String(path)
+    storageScanPath = String(path)
+    storageScanEntries = []
+    storageScanModel.clear()
+    storageScanTotalBytes = 0
+    storageScanDirectBytes = 0
+    storageScanPartial = false
+    storageScanError = ""
+    storageScanCancelRequested = false
+    storageScanLoading = true
+    storageScanProc.running = true
+  }
+
+  function scanHome() {
+    storageScanHistory = []
+    startStorageScan(Quickshell.env("HOME"), false)
+  }
+
+  function chooseStorageFolder() {
+    if (storagePickerProc.running || storageScanProc.running) return
+    storagePickerLoading = true
+    storagePickerOutput = ""
+    storagePickerProc.running = true
+  }
+
+  function applyStoragePicker(raw) {
+    try {
+      var result = JSON.parse(String(raw || ""))
+      if (result.ok && !result.cancelled && result.path) {
+        storageScanHistory = []
+        startStorageScan(result.path, false)
+      }
+    } catch (e) {
+      showToast("The selected folder could not be read.")
+    }
+  }
+
+  function appendStorageScanLine(line) {
+    try {
+      var event = JSON.parse(String(line || ""))
+      if (event.event === "started") {
+        storageScanPath = String(event.path || storageScanPath)
+      } else if (event.event === "entry") {
+        storageScanEntries = storageScanEntries.concat([event])
+        rebuildStorageScan()
+      } else if (event.event === "completed") {
+        storageScanTotalBytes = Number(event.totalBytes) || 0
+        storageScanDirectBytes = Number(event.directFileBytes) || 0
+        storageScanPartial = event.partial === true
+        storageScanLoading = false
+        rebuildStorageScan()
+      } else if (event.event === "cancelled") {
+        storageScanLoading = false
+      } else if (event.event === "error") {
+        storageScanLoading = false
+        storageScanError = String(event.message || "The folder scan failed.")
+      }
+    } catch (e) {
+      storageScanError = "A scan record could not be read."
+    }
+  }
+
+  function scanStorageChild(index) {
+    if (storageScanProc.running || storageScanModel.count === 0) return
+    var row = storageScanModel.get(Model.clampIndex(index, storageScanModel.count))
+    if (row && row.path) startStorageScan(row.path, true)
+  }
+
+  function scanStorageBack() {
+    if (storageScanProc.running || storageScanHistory.length === 0) return
+    var history = storageScanHistory.slice()
+    var path = history.pop()
+    storageScanHistory = history
+    startStorageScan(path, false)
+  }
+
+  function cancelStorageScan() {
+    if (!storageScanProc.running) return
+    storageScanCancelRequested = true
+    storageScanProc.running = false
+  }
+
+  function openStorageFolder(path) {
+    if (storageOpenProc.running || !path) return
+    pendingStoragePath = String(path)
+    storageOpenProc.running = true
   }
 
   function requestTouchpad(value, isUndo) {
@@ -539,6 +692,12 @@ Item {
     } else if (pageIndex === 4 && deviceCategories.length > 0) {
       selectedDeviceIndex = Model.wrapIndex(selectedDeviceIndex, delta, deviceCategories.length)
       if (deviceList) deviceList.positionViewAtIndex(selectedDeviceIndex, ListView.Contain)
+    } else if (pageIndex === 5 && !detailOpen && storageCategories.length > 0) {
+      selectedStorageIndex = Model.wrapIndex(selectedStorageIndex, delta, storageCategories.length)
+      if (storageCategoryList) storageCategoryList.positionViewAtIndex(selectedStorageIndex, ListView.Contain)
+    } else if (pageIndex === 5 && detailOpen && selectedStorageIndex === 1 && storageScanModel.count > 0) {
+      selectedScanIndex = Model.wrapIndex(selectedScanIndex, delta, storageScanModel.count)
+      if (storageScanList) storageScanList.positionViewAtIndex(selectedScanIndex, ListView.Contain)
     }
   }
 
@@ -546,6 +705,8 @@ Item {
     if (pageIndex === 2 && selectedProgramRow) detailOpen = true
     else if (pageIndex === 3 && selectedHealthRow) detailOpen = true
     else if (pageIndex === 4) detailOpen = true
+    else if (pageIndex === 5 && !detailOpen) detailOpen = true
+    else if (pageIndex === 5 && detailOpen && selectedStorageIndex === 1) scanStorageChild(selectedScanIndex)
   }
 
   function requestSelectedAction() {
@@ -623,6 +784,7 @@ Item {
 
   ListModel { id: programModel; dynamicRoles: true }
   ListModel { id: healthModel; dynamicRoles: true }
+  ListModel { id: storageScanModel; dynamicRoles: true }
 
   component ProgramIcon: Item {
     id: programIcon
@@ -793,6 +955,67 @@ Item {
   }
 
   Process {
+    id: storageProc
+    command: [root.backendPath, "collect", "storage"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.storageOutput = text
+        if (text) root.applyStorage(text)
+      }
+    }
+    stderr: StdioCollector { id: storageStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.storageLoading = false
+      if (exitCode !== 0 && root.storageOutput === "")
+        root.storageError = String(storageStderr.text || "Storage insights could not be refreshed.").trim()
+    }
+  }
+
+  Process {
+    id: storageScanProc
+    command: [root.backendPath, "storage", "scan", root.pendingStoragePath]
+    stdout: SplitParser { onRead: function(line) { root.appendStorageScanLine(line) } }
+    stderr: StdioCollector { id: storageScanStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.storageScanLoading = false
+      if (exitCode !== 0 && !root.storageScanCancelRequested)
+        root.storageScanError = String(storageScanStderr.text || "The folder scan did not complete.").trim()
+      root.storageScanCancelRequested = false
+    }
+  }
+
+  Process {
+    id: storagePickerProc
+    command: [root.backendPath, "storage", "choose-directory"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.storagePickerOutput = text
+        if (text) root.applyStoragePicker(text)
+      }
+    }
+    stderr: StdioCollector { id: storagePickerStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.storagePickerLoading = false
+      if (exitCode !== 0)
+        root.showToast(String(storagePickerStderr.text || "The folder picker could not be opened.").trim())
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
+  }
+
+  Process {
+    id: storageOpenProc
+    command: [root.backendPath, "storage", "open", root.pendingStoragePath]
+    stderr: StdioCollector { id: storageOpenStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0)
+        root.showToast(String(storageOpenStderr.text || "The folder could not be opened.").trim())
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
+  }
+
+  Process {
     id: deviceSetProc
     command: [root.backendPath, "devices", "set", "touchpad", root.pendingDeviceValue]
     stdout: StdioCollector {
@@ -914,6 +1137,7 @@ Item {
           root.showToast(message)
           if (root.pageIndex === 2) refreshDelay.restart()
           else if (root.pageIndex === 3) root.refreshHealth()
+          else if (root.pageIndex === 5) root.refreshStorage()
         }
       } else {
         root.showToast(String(actionStderr.text || "The workflow could not be started.").trim())
@@ -1015,9 +1239,10 @@ Item {
             else if (root.pageIndex === 2) root.refreshPrograms()
             else if (root.pageIndex === 3) root.refreshHealth()
             else if (root.pageIndex === 4) root.refreshDevices()
+            else if (root.pageIndex === 5) root.refreshStorage()
             else root.refreshAll()
             event.accepted = true
-          } else if (alt && event.key >= Qt.Key_1 && event.key <= Qt.Key_5) {
+          } else if (alt && event.key >= Qt.Key_1 && event.key <= Qt.Key_6) {
             root.setPage(event.key - Qt.Key_1); event.accepted = true
           } else if (root.pageIndex === 1 && !keyCatcher.activeFocus) {
             return
@@ -1070,15 +1295,15 @@ Item {
             }
 
             Text {
-              visible: root.appearanceLoading || root.programsLoading || root.healthLoading || root.devicesLoading
-              text: root.appearanceLoading ? "Reading appearance" : root.devicesLoading ? "Reading devices" : root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Running Doctor"
+              visible: root.appearanceLoading || root.programsLoading || root.healthLoading || root.devicesLoading || root.storageLoading
+              text: root.appearanceLoading ? "Reading appearance" : root.devicesLoading ? "Reading devices" : root.storageLoading ? "Reading storage" : root.programsLoading && root.healthLoading ? "Scanning system" : root.programsLoading ? "Scanning programs" : "Running Doctor"
               color: root.mutedText
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
 
             Text {
-              visible: root.appearanceLoading || root.programsLoading || root.healthLoading || root.devicesLoading
+              visible: root.appearanceLoading || root.programsLoading || root.healthLoading || root.devicesLoading || root.storageLoading
               text: "󰑐"
               color: root.selectedText
               font.family: Style.font.family
@@ -1134,7 +1359,8 @@ Item {
                   { label: "Appearance", icon: "󰏘", hint: "Alt+2" },
                   { label: "Programs", icon: "󰀻", hint: "Alt+3" },
                   { label: "Doctor", icon: "󰒘", hint: "Alt+4" },
-                  { label: "Devices", icon: "󰒓", hint: "Alt+5" }
+                  { label: "Devices", icon: "󰒓", hint: "Alt+5" },
+                  { label: "Storage", icon: "󰋊", hint: "Alt+6" }
                 ]
                 delegate: Button {
                   required property int index
@@ -1160,7 +1386,7 @@ Item {
               }
               Text {
                 Layout.fillWidth: true
-                text: "Alt+1–5    Pages\nTab         Controls\n↑↓ / j k   Navigate\nCtrl+Z      Undo setting\nEsc         Back"
+                text: "Alt+1–6    Pages\nTab         Controls\n↑↓ / j k   Navigate\nCtrl+Z      Undo setting\nEsc         Back"
                 color: root.mutedText
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -1181,19 +1407,40 @@ Item {
               Layout.fillHeight: true
               spacing: Style.spacing.sm
 
-              RowLayout {
+              QQC.ScrollView {
+                id: narrowTabs
                 visible: root.narrow
                 Layout.fillWidth: true
-                spacing: Style.spacing.sm
-                Repeater {
-                  model: ["Overview", "Appearance", "Programs", "Doctor", "Devices"]
-                  delegate: Button {
-                    required property int index
-                    required property string modelData
-                    Layout.fillWidth: true
-                    text: modelData
-                    selected: root.pageIndex === index
-                    onClicked: root.setPage(index)
+                Layout.preferredHeight: Style.space(42)
+                clip: true
+                contentWidth: narrowTabRow.width
+                QQC.ScrollBar.vertical.policy: QQC.ScrollBar.AlwaysOff
+                QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AsNeeded
+
+                WheelHandler {
+                  onWheel: function(event) {
+                    var flick = narrowTabs.contentItem
+                    var delta = event.pixelDelta.x !== 0 ? event.pixelDelta.x
+                      : event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 2
+                    var maximum = Math.max(0, flick.contentWidth - flick.width)
+                    flick.contentX = Math.max(0, Math.min(maximum, flick.contentX - delta))
+                    event.accepted = true
+                  }
+                }
+
+                Row {
+                  id: narrowTabRow
+                  spacing: Style.spacing.sm
+                  Repeater {
+                    model: ["Overview", "Appearance", "Programs", "Doctor", "Devices", "Storage"]
+                    delegate: Button {
+                      required property int index
+                      required property string modelData
+                      width: Math.max(Style.space(108), implicitWidth)
+                      text: modelData
+                      selected: root.pageIndex === index
+                      onClicked: root.setPage(index)
+                    }
                   }
                 }
               }
@@ -2360,6 +2607,346 @@ Item {
                             }
                             Button { width: parent.width; text: "Edit input configuration"; iconText: "󰏫"; bordered: true; onClicked: root.requestDeviceHandoff("input-config") }
                             Text { width: parent.width; text: "Only the canonical touchpad toggle is changed here. Keyboard, mouse and per-device configuration stay in Omarchy's input file."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+                // -------------------------------------------------- Storage
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  spacing: Style.spacing.md
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 0
+                      Text { text: "Storage"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                      Text { text: "Read-only disk insight with deliberate Omarchy handoffs"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                    }
+                    Button { text: "Refresh"; iconText: "󰑐"; bordered: true; enabled: !root.storageLoading; onClicked: root.refreshStorage() }
+                  }
+
+                  Text {
+                    visible: root.storageError !== ""
+                    Layout.fillWidth: true
+                    text: root.storageError
+                    color: Color.urgent
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                  }
+
+                  RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: Style.spacing.md
+
+                    Item {
+                      visible: !root.narrow || !root.detailOpen
+                      Layout.fillWidth: true
+                      Layout.fillHeight: true
+                      Layout.preferredWidth: Style.space(430)
+
+                      ListView {
+                        id: storageCategoryList
+                        anchors.fill: parent
+                        clip: true
+                        spacing: Style.spacing.xs
+                        model: root.storageCategories
+                        QQC.ScrollBar.vertical: PersistentScrollBar {
+                          id: storageCategoryScrollbar
+                          parent: storageCategoryList
+                          anchors.top: storageCategoryList.top
+                          anchors.right: storageCategoryList.right
+                          anchors.bottom: storageCategoryList.bottom
+                        }
+                        delegate: CursorSurface {
+                          id: storageCategoryDelegate
+                          required property int index
+                          required property var modelData
+                          width: storageCategoryList.width - (storageCategoryScrollbar.visible ? Style.space(12) : 0)
+                          height: Style.space(72)
+                          hasCursor: root.cursorActive && root.selectedStorageIndex === index
+                          current: root.detailOpen && root.selectedStorageIndex === index
+                          foreground: root.foreground
+                          accent: root.selectedText
+
+                          RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: Style.spacing.md
+                            anchors.rightMargin: Style.spacing.md
+                            spacing: Style.spacing.md
+                            Text { text: storageCategoryDelegate.modelData.icon; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.iconLarge }
+                            ColumnLayout {
+                              Layout.fillWidth: true
+                              spacing: 0
+                              Text { Layout.fillWidth: true; text: storageCategoryDelegate.modelData.title; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
+                              Text { Layout.fillWidth: true; text: Model.storageCategorySummary(root.storage, storageCategoryDelegate.modelData.id); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                            }
+                            Text { text: "󰁔"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconSmall }
+                          }
+
+                          MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onEntered: { root.cursorActive = true; root.selectedStorageIndex = index }
+                            onClicked: { root.selectedStorageIndex = index; root.detailOpen = true }
+                          }
+                        }
+                      }
+
+                      LoadingState {
+                        anchors.centerIn: parent
+                        visible: root.storageLoading && root.storage.generatedAt === ""
+                        label: "Reading storage…"
+                      }
+                    }
+
+                    BorderSurface {
+                      visible: !root.narrow || root.detailOpen
+                      Layout.fillHeight: true
+                      Layout.preferredWidth: root.narrow ? -1 : Style.space(450)
+                      Layout.fillWidth: root.narrow
+                      color: Style.normalFillFor(root.foreground, Color.accent)
+                      borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                      padding: Style.spacing.panelPadding
+
+                      QQC.ScrollView {
+                        id: storageDetailScroll
+                        anchors.fill: parent
+                        anchors.margins: parent.contentLeftInset
+                        clip: true
+                        rightPadding: storageDetailScrollbar.visible ? Style.space(16) : 0
+                        QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
+                        QQC.ScrollBar.vertical: PersistentScrollBar {
+                          id: storageDetailScrollbar
+                          parent: storageDetailScroll
+                          anchors.top: storageDetailScroll.top
+                          anchors.right: storageDetailScroll.right
+                          anchors.bottom: storageDetailScroll.bottom
+                        }
+
+                        Column {
+                          width: storageDetailScroll.availableWidth
+                          spacing: Style.spacing.md
+
+                          Button { visible: root.narrow; text: "Back to storage"; iconText: "󰁍"; onClicked: root.detailOpen = false }
+
+                          Row {
+                            width: parent.width
+                            spacing: Style.spacing.md
+                            Text { text: root.storageCategories[root.selectedStorageIndex].icon; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.displayLarge }
+                            Column {
+                              width: parent.width - parent.children[0].width - parent.spacing
+                              spacing: Style.spacing.xs
+                              Text { text: root.storageCategories[root.selectedStorageIndex].title; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+                              Text { width: parent.width; text: root.storageCategories[root.selectedStorageIndex].description; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                            }
+                          }
+
+                          PanelSeparator { width: parent.width; foreground: root.foreground }
+
+                          Column {
+                            visible: root.selectedStorageIndex === 0
+                            width: parent.width
+                            spacing: Style.spacing.md
+
+                            PanelSectionHeader { width: parent.width; text: "PHYSICAL DRIVES"; foreground: root.foreground; fontFamily: Style.font.family }
+                            Repeater {
+                              model: root.storage.drives
+                              delegate: BorderSurface {
+                                required property var modelData
+                                width: parent.width
+                                implicitHeight: driveContent.implicitHeight + Style.spacing.md * 2
+                                color: "transparent"
+                                borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                                padding: Style.spacing.md
+                                Column {
+                                  id: driveContent
+                                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                  anchors.margins: parent.contentLeftInset
+                                  spacing: Style.spacing.xs
+                                  Text { width: parent.width; text: (modelData.model || modelData.name || "Drive") + " · " + Model.formatBytes(modelData.sizeBytes); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideRight }
+                                  Text { width: parent.width; text: (modelData.transport ? String(modelData.transport).toUpperCase() + " · " : "") + (modelData.rotational ? "Rotational" : "Solid state") + (modelData.encrypted ? " · Encrypted" : "") + (modelData.readOnly ? " · Read only" : ""); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                                  Text { width: parent.width; text: Model.storageHealthLabel(modelData.health) + (Number(modelData.health.temperatureC) > 0 ? " · " + modelData.health.temperatureC + "°C" : "") + (Number(modelData.health.powerOnHours) > 0 ? " · " + modelData.health.powerOnHours + " power-on hours" : ""); color: modelData.health.state === "healthy" ? root.selectedText : modelData.health.state === "critical" || modelData.health.state === "warning" ? Color.urgent : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                                  Text { visible: modelData.health.selftestStatus !== ""; width: parent.width; text: "Last self-test: " + modelData.health.selftestStatus; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                                  Text { visible: Number(modelData.health.updatedAtEpoch) > 0; width: parent.width; text: Model.storageHealthUpdatedLabel(modelData.health.updatedAtEpoch); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                                  Repeater {
+                                    model: modelData.partitions
+                                    delegate: Text { required property var modelData; width: parent.width; text: "• " + modelData.path + " · " + Model.formatBytes(modelData.sizeBytes) + (modelData.filesystem ? " · " + modelData.filesystem : "") + (modelData.encrypted ? " · Encrypted" : "") + (modelData.mountpoints && modelData.mountpoints.length > 0 ? " · " + modelData.mountpoints.join(", ") : " · Not mounted"); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                                  }
+                                }
+                              }
+                            }
+
+                            PanelSectionHeader { width: parent.width; text: "MOUNTED FILESYSTEMS"; foreground: root.foreground; fontFamily: Style.font.family }
+                            Repeater {
+                              model: root.storage.filesystems
+                              delegate: BorderSurface {
+                                required property var modelData
+                                width: parent.width
+                                implicitHeight: filesystemContent.implicitHeight + Style.spacing.md * 2
+                                color: "transparent"
+                                borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                                padding: Style.spacing.md
+                                Column {
+                                  id: filesystemContent
+                                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                  anchors.margins: parent.contentLeftInset
+                                  spacing: Style.spacing.xs
+                                  Text { width: parent.width; text: modelData.mountpoint + " · " + String(modelData.filesystem).toUpperCase(); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; elide: Text.ElideMiddle }
+                                  Text { width: parent.width; text: Model.formatBytes(modelData.usedBytes) + " used of " + Model.formatBytes(modelData.sizeBytes) + " · " + modelData.percent + "%"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                                  Rectangle {
+                                    width: parent.width; height: Style.space(6); radius: height / 2
+                                    color: root.border; opacity: 0.45
+                                    Rectangle { width: parent.width * Math.max(0, Math.min(100, Number(modelData.percent) || 0)) / 100; height: parent.height; radius: height / 2; color: root.selectedText }
+                                  }
+                                  Text { visible: modelData.subvolumeMounts && modelData.subvolumeMounts.length > 1; width: parent.width; text: "Shared Btrfs capacity: " + modelData.subvolumeMounts.join(", "); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                                }
+                              }
+                            }
+                            Button { width: parent.width; text: "Open disk speed test"; iconText: "󰓅"; bordered: true; onClicked: root.requestAction("disk-speedtest", "_") }
+                            Text { width: parent.width; text: "The benchmark is owned by Quattro and writes a temporary file only after confirmation."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+                          }
+
+                          Column {
+                            visible: root.selectedStorageIndex === 1
+                            width: parent.width
+                            spacing: Style.spacing.md
+
+                            Row {
+                              width: parent.width
+                              spacing: Style.spacing.sm
+                              Button { text: "Scan Home"; iconText: "󰋜"; bordered: true; enabled: !root.storageScanLoading && !root.storagePickerLoading; onClicked: root.scanHome() }
+                              Button { text: root.storagePickerLoading ? "Choosing…" : "Choose folder"; iconText: "󰉋"; bordered: true; enabled: !root.storageScanLoading && !root.storagePickerLoading; onClicked: root.chooseStorageFolder() }
+                            }
+
+                            Text { visible: root.storageScanPath !== ""; width: parent.width; text: root.storageScanPath; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true; wrapMode: Text.WrapAnywhere }
+                            Text { visible: root.storageScanPath !== "" && !root.storageScanLoading; width: parent.width; text: Model.formatBytes(root.storageScanTotalBytes) + " total · " + Model.formatBytes(root.storageScanDirectBytes) + " in files directly here" + (root.storageScanPartial ? " · Partial result" : ""); color: root.storageScanPartial ? Color.urgent : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+
+                            Row {
+                              visible: root.storageScanPath !== ""
+                              width: parent.width
+                              spacing: Style.spacing.sm
+                              Button { visible: root.storageScanHistory.length > 0; text: "Back"; iconText: "󰁍"; bordered: true; enabled: !root.storageScanLoading; onClicked: root.scanStorageBack() }
+                              Button { text: "Open folder"; iconText: "󰉋"; bordered: true; enabled: !root.storageScanLoading; onClicked: root.openStorageFolder(root.storageScanPath) }
+                              Button { visible: root.storageScanLoading; text: "Cancel scan"; iconText: "󰅖"; bordered: true; onClicked: root.cancelStorageScan() }
+                            }
+
+                            LoadingState { visible: root.storageScanLoading; width: parent.width; label: "Measuring this folder…" }
+                            Text { visible: root.storageScanError !== ""; width: parent.width; text: root.storageScanError; color: Color.urgent; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                            Text { visible: root.storageScanPath === "" && !root.storageScanLoading; width: parent.width; text: "No scan has run. OmaPanel never scans storage automatically."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.body; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter }
+
+                            Column {
+                              id: storageScanList
+                              visible: storageScanModel.count > 0
+                              width: parent.width
+                              spacing: Style.spacing.xs
+                              Repeater {
+                                model: storageScanModel
+                                delegate: CursorSurface {
+                                  id: scanEntryDelegate
+                                  required property int index
+                                  required property string name
+                                  required property string path
+                                  required property double sizeBytes
+                                  width: storageScanList.width
+                                  height: Style.space(56)
+                                  hasCursor: root.cursorActive && root.selectedScanIndex === index
+                                  foreground: root.foreground
+                                  accent: root.selectedText
+                                  RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: Style.spacing.md; anchors.rightMargin: Style.spacing.md
+                                    spacing: Style.spacing.md
+                                    Text { text: "󰉋"; color: root.selectedText; font.family: Style.font.family; font.pixelSize: Style.font.icon }
+                                    Text { Layout.fillWidth: true; text: scanEntryDelegate.name; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideMiddle }
+                                    Text { text: Model.formatBytes(scanEntryDelegate.sizeBytes); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                                    Text { text: "󰁔"; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.iconSmall }
+                                  }
+                                  MouseArea {
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onEntered: { root.cursorActive = true; root.selectedScanIndex = index }
+                                    onClicked: root.scanStorageChild(index)
+                                  }
+                                }
+                              }
+                            }
+                          }
+
+                          Column {
+                            visible: root.selectedStorageIndex === 2
+                            width: parent.width
+                            spacing: Style.spacing.md
+
+                            BorderSurface {
+                              width: parent.width; implicitHeight: packageCacheContent.implicitHeight + Style.spacing.md * 2
+                              color: "transparent"; borderSpec: Border.controlSpec("normal", root.foreground, Color.accent); padding: Style.spacing.md
+                              Column {
+                                id: packageCacheContent
+                                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: parent.contentLeftInset
+                                spacing: Style.spacing.xs
+                                Text { width: parent.width; text: "Package cache · " + Model.formatBytes(root.storage.maintenance.packageCache.totalBytes); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WordWrap }
+                                Text { width: parent.width; text: root.storage.maintenance.packageCache.fileCount + " files · " + root.storage.maintenance.packageCache.prune.policy; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                                Text { visible: root.storage.maintenance.packageCache.partial; width: parent.width; text: "Some cache entries were not readable, so this total is partial."; color: Color.urgent; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                                Text { width: parent.width; text: root.storage.maintenance.packageCache.prune.candidateCount > 0 ? Model.formatBytes(root.storage.maintenance.packageCache.prune.candidateBytes) + " can be reclaimed by the canonical policy." : "No cache files currently qualify for the canonical prune policy."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                                Button { width: parent.width; text: "Review cache prune"; iconText: "󰃢"; bordered: true; enabled: root.storage.maintenance.packageCache.prune.state === "ok"; onClicked: root.requestAction("cache-prune", "_") }
+                              }
+                            }
+
+                            BorderSurface {
+                              width: parent.width; implicitHeight: orphanContent.implicitHeight + Style.spacing.md * 2
+                              color: "transparent"; borderSpec: Border.controlSpec("normal", root.foreground, Color.accent); padding: Style.spacing.md
+                              Column {
+                                id: orphanContent
+                                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: parent.contentLeftInset
+                                spacing: Style.spacing.xs
+                                Text { width: parent.width; text: root.storage.maintenance.orphans.count + " orphan package" + (root.storage.maintenance.orphans.count === 1 ? "" : "s"); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
+                                Text { visible: root.storage.maintenance.orphans.packages.length > 0; width: parent.width; text: root.storage.maintenance.orphans.packages.join(", "); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WrapAnywhere }
+                                Text { visible: root.storage.maintenance.orphans.packages.length === 0; width: parent.width; text: "No orphan packages were reported."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+                                Button { width: parent.width; text: "Review orphan packages"; iconText: "󰣇"; bordered: true; enabled: root.storage.maintenance.orphans.state === "ok"; onClicked: root.requestAction("review-orphans", "_") }
+                              }
+                            }
+
+                            Text { width: parent.width; text: "System journal: " + Model.formatBytes(root.storage.maintenance.journal.totalBytes) + "\nUser cache: " + Model.formatBytes(root.storage.maintenance.userCache.totalBytes); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; wrapMode: Text.WordWrap }
+                            Text { width: parent.width; text: "Journal and user-cache sizes are informational. OmaPanel does not offer deletion because Omarchy has no matching reviewed workflow."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                          }
+
+                          Column {
+                            visible: root.selectedStorageIndex === 3
+                            width: parent.width
+                            spacing: Style.spacing.md
+
+                            Text { width: parent.width; text: root.storage.snapshots.scopes.length > 0 ? root.storage.snapshots.scopes.length + " configured recovery scope" + (root.storage.snapshots.scopes.length === 1 ? "" : "s") : "No configured recovery scopes were reported."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WordWrap }
+                            Repeater {
+                              model: root.storage.snapshots.scopes
+                              delegate: BorderSurface {
+                                required property var modelData
+                                width: parent.width
+                                implicitHeight: snapshotScopeContent.implicitHeight + Style.spacing.md * 2
+                                color: "transparent"; borderSpec: Border.controlSpec("normal", root.foreground, Color.accent); padding: Style.spacing.md
+                                Column {
+                                  id: snapshotScopeContent
+                                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: parent.contentLeftInset
+                                  spacing: Style.spacing.xs
+                                  Text { width: parent.width; text: modelData.config + " · " + modelData.subvolume; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; wrapMode: Text.WrapAnywhere }
+                                  Text { width: parent.width; text: modelData.state === "ok" ? modelData.snapshots.length + " readable snapshot" + (modelData.snapshots.length === 1 ? "" : "s") : modelData.message; color: modelData.state === "permission-denied" ? Color.urgent : root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
+                                  Repeater {
+                                    model: modelData.snapshots
+                                    delegate: Text { required property var modelData; width: parent.width; text: "#" + modelData.number + " · " + (modelData.description || modelData.type || "Snapshot") + (modelData.date ? " · " + modelData.date : ""); color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                                  }
+                                }
+                              }
+                            }
+                            Text { visible: root.storage.snapshots.scopes.length > 0 && root.storage.snapshots.snapshotCount === 0; width: parent.width; text: "OmaPanel never changes Snapper permissions. The terminal workflows can request sudo when you deliberately continue."; color: root.mutedText; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.WordWrap }
+                            Button { width: parent.width; text: "Create snapshot"; iconText: "󰆓"; bordered: true; onClicked: root.requestAction("snapshot-create", "_") }
+                            Button { width: parent.width; text: "Open snapshot restore"; iconText: "󰋚"; bordered: true; onClicked: root.requestAction("snapshot-restore", "_") }
                           }
                         }
                       }
